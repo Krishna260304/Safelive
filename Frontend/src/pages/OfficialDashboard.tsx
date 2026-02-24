@@ -821,7 +821,7 @@ const OfficialDashboard = () => {
               const fieldInspectorWindowAvailable =
                 role !== 'field_inspector' || ticket.status === 'verified';
               const showProgressEditor =
-                isTicketsPage && (role === 'worker' || (role === 'field_inspector' && fieldInspectorWindowAvailable));
+                isTicketsPage && role === 'field_inspector' && fieldInspectorWindowAvailable;
               const showOfficialActions = isTicketsPage && (role === 'department' || role === 'supervisor');
               const showLogbookAction =
                 isTicketsPage &&
@@ -1045,11 +1045,7 @@ const OfficialDashboard = () => {
                           onChange={(event) =>
                             setProgressDrafts((prev) => ({ ...prev, [ticket.id]: event.target.value }))
                           }
-                          placeholder={
-                            role === 'field_inspector'
-                              ? 'Enter today field inspection update...'
-                              : 'Enter work completion update...'
-                          }
+                          placeholder="Enter today field inspection update..."
                         />
                         <Button
                           onClick={() => void handleProgressUpdate(ticket.id)}
