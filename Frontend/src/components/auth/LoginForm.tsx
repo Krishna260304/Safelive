@@ -276,8 +276,8 @@ export const LoginForm = () => {
           ) : (
             <div className="space-y-2">
               <Label htmlFor="phone">Phone Number</Label>
-              <div className="flex gap-2">
-                <div className="flex items-center px-3 bg-muted border border-input rounded-md text-sm text-muted-foreground">
+              <div className="flex items-stretch gap-2">
+                <div className="flex h-10 min-w-[3.25rem] shrink-0 items-center justify-center rounded-md border border-input bg-muted px-3 text-sm text-muted-foreground">
                   +91
                 </div>
                 <Input
@@ -287,7 +287,7 @@ export const LoginForm = () => {
                   autoComplete="tel"
                   {...phoneForm.register('phone')}
                   className={cn(
-                    "flex-1",
+                    "h-10 flex-1",
                     phoneForm.formState.errors.phone && "border-destructive focus-visible:ring-destructive"
                   )}
                 />

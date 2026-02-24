@@ -60,6 +60,7 @@ export const API_ENDPOINTS = {
     GET_BY_ID: (id: string) => `/tickets/${id}`,
     UPDATE_STATUS: (id: string) => `/tickets/${id}/status`,
     ASSIGN: (id: string) => `/tickets/${id}/assign`,
+    ASSIGN_SUPERVISOR: (id: string) => `/tickets/${id}/assign-supervisor`,
     PROGRESS_UPDATE: (id: string) => `/tickets/${id}/progress-update`,
     LOGBOOK: (id: string) => `/tickets/${id}/logbook`,
     STATS: '/tickets/stats',

@@ -22,9 +22,12 @@ export interface Ticket {
   assigneeEmail?: string;
   assigneeUserId?: string;
   workerId?: string;
+  workerCode?: string;
   workerIds?: string[];
+  workerCodes?: string[];
   assignees?: Array<{
     workerId: string;
+    workerCode?: string;
     name: string;
     phone?: string;
     email?: string;
@@ -47,6 +50,17 @@ export interface Ticket {
     name?: string;
     timestamp?: string;
   };
+  reopenedSupervisorId?: string;
+  reopenedSupervisorName?: string;
+  reopenedSupervisorEmail?: string;
+  reopenedSupervisorAssignedAt?: string;
+  reopenedFromResolverId?: string;
+  reopenedFromResolverName?: string;
+  reopenedFromResolverRole?: string;
+  resolvedById?: string;
+  resolvedByName?: string;
+  resolvedByRole?: string;
+  resolvedAt?: string;
   reopenWarning?: {
     message: string;
     issuedAt: string;
@@ -79,6 +93,11 @@ export interface AssignTicketData {
   assigneeName?: string;
   assigneePhone?: string;
   assigneePhoto?: string;
+  notes?: string;
+}
+
+export interface AssignSupervisorData {
+  supervisorId: string;
   notes?: string;
 }
 
@@ -182,6 +201,10 @@ export const ticketService = {
 
   async assignTicket(id: string, data: AssignTicketData): Promise<ApiResponse<Ticket>> {
     return apiClient.post<Ticket>(API_ENDPOINTS.TICKETS.ASSIGN(id), data);
+  },
+
+  async assignSupervisor(id: string, data: AssignSupervisorData): Promise<ApiResponse<Ticket>> {
+    return apiClient.post<Ticket>(API_ENDPOINTS.TICKETS.ASSIGN_SUPERVISOR(id), data);
   },
 
   async updateProgress(id: string, data: ProgressUpdateData): Promise<ApiResponse<Ticket>> {

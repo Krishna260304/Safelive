@@ -173,7 +173,7 @@ def heatmap(current_user: dict = Depends(get_official_user)):
         "status": 1,
         "category": 1
     })
-    priority_weights = {"low": 0.5, "medium": 1.0, "high": 1.5, "critical": 2.0}
+    priority_weights = {"low": 0.5, "medium": 1.0, "high": 1.5}
     for row in cursor:
         lat = _safe_float(row.get("latitude"))
         lng = _safe_float(row.get("longitude"))

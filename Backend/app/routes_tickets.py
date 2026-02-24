@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user, get_official_user, is_official_account
 from app.database import incidents, tickets, users
-from app.models import TicketAssign, TicketProgressUpdate, TicketUpdateStatus
+from app.models import TicketAssign, TicketAssignSupervisor, TicketProgressUpdate, TicketUpdateStatus
 from app.roles import normalize_official_role
 from app.services.audit_log import append_incident_log, get_ticket_logbook
 from app.services.email_service import send_ticket_update_email
@@ -54,6 +54,14 @@ def _merge_queries(base: dict | None, extra: dict | None) -> dict:
 def _ticket_scope_query(current_user: dict) -> dict:
     role = _current_official_role(current_user)
     user_id = str(current_user.get("id") or "").strip()
+    if role == ROLE_SUPERVISOR and user_id:
+        return {
+            "$or": [
+                {"reopenedBy": {"$exists": False}},
+                {"reopenedBy": None},
+                {"reopenedSupervisorId": user_id},
+            ]
+        }
     if role == ROLE_WORKER and user_id:
         return {
             "$or": [
@@ -72,19 +80,7 @@ def _ticket_scope_query(current_user: dict) -> dict:
                     {"fieldInspectorId": ""},
                 ]
             },
-            {
-                "$and": [
-                    {"status": "verified"},
-                    {
-                        "$or": [
-                            {"assigneeUserId": {"$exists": True, "$nin": ["", None]}},
-                            {"workerId": {"$exists": True, "$nin": ["", None]}},
-                            {"workerIds.0": {"$exists": True}},
-                            {"assignees.0": {"$exists": True}},
-                        ]
-                    },
-                ]
-            },
+            {"status": "verified"},
         )
     return {}
 
@@ -103,8 +99,10 @@ def _get_ticket_doc(ticket_id: str):
 def _can_access_ticket(doc: dict, current_user: dict) -> bool:
     role = _current_official_role(current_user)
     user_id = str(current_user.get("id") or "").strip()
-    if role in {ROLE_DEPARTMENT, ROLE_SUPERVISOR}:
+    if role == ROLE_DEPARTMENT:
         return True
+    if role == ROLE_SUPERVISOR:
+        return _supervisor_can_handle_ticket(doc, user_id)
     if role == ROLE_WORKER:
         return _is_worker_assigned(doc, user_id)
     if role == ROLE_FIELD_INSPECTOR:
@@ -168,8 +166,24 @@ def _is_verified_ticket(doc: dict) -> bool:
     return (doc.get("status") or "").strip().lower() == "verified"
 
 
+def _reopened_supervisor_id(doc: dict) -> str:
+    return str(doc.get("reopenedSupervisorId") or "").strip()
+
+
+def _supervisor_can_handle_ticket(doc: dict, supervisor_user_id: str | None) -> bool:
+    current_user_id = str(supervisor_user_id or "").strip()
+    if not current_user_id:
+        return False
+    if not _is_reopened_case(doc):
+        return True
+    assigned_supervisor_id = _reopened_supervisor_id(doc)
+    if not assigned_supervisor_id:
+        return False
+    return assigned_supervisor_id == current_user_id
+
+
 def _is_field_inspector_ticket_eligible(doc: dict) -> bool:
-    return _is_verified_ticket(doc) and _has_worker_assignment(doc)
+    return _is_verified_ticket(doc)
 
 
 def _resolve_ticket_reporter_email(doc: dict) -> str | None:
@@ -371,12 +385,38 @@ def _find_worker_doc(worker_id: str | None):
     return doc
 
 
-def _notify_ticket_reopened(doc: dict, reopened_by: dict):
+def _find_supervisor_doc(supervisor_id: str | None):
+    candidate = (supervisor_id or "").strip()
+    if not candidate:
+        return None
+    doc = None
+    try:
+        doc = users.find_one({"_id": to_object_id(candidate)})
+    except Exception:
+        doc = users.find_one({"_id": candidate})
+    if not doc:
+        return None
+    if doc.get("userType") != "official":
+        return None
+    if normalize_official_role(doc.get("officialRole")) != ROLE_SUPERVISOR:
+        return None
+    return doc
+
+
+def _notify_ticket_reopened(
+    doc: dict,
+    reopened_by: dict,
+    previous_resolver: dict[str, str] | None = None,
+):
     department_name = reopened_by.get("name") or reopened_by.get("email") or "Department Officer"
     ticket_title = doc.get("title", "Ticket")
-    message = (
-        f"SafeLive notice: Ticket '{ticket_title}' has been reopened by {department_name}. "
-    )
+    previous_resolver = previous_resolver or {}
+    previous_resolver_name = str(previous_resolver.get("name") or "").strip()
+    previous_resolver_role = normalize_official_role(previous_resolver.get("role"))
+
+    message = f"SafeLive notice: Ticket '{ticket_title}' has been reopened by {department_name}."
+    if previous_resolver_name and previous_resolver_role == ROLE_SUPERVISOR:
+        message = f"{message} Previous resolving supervisor: {previous_resolver_name}."
 
     assignee_phones: set[str] = set()
     assignee_emails: set[str] = set()
@@ -431,6 +471,7 @@ def _notify_ticket_reopened(doc: dict, reopened_by: dict):
         "message": message,
         "issuedAt": _now_iso(),
         "departmentName": department_name,
+        "supervisorName": previous_resolver_name if previous_resolver_role == ROLE_SUPERVISOR else "",
     }
     try:
         tickets.update_one(
@@ -511,27 +552,37 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
     if normalized_status not in TICKET_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status")
 
+    existing_status = (existing.get("status") or "").strip().lower()
     is_reopened_case = _is_reopened_case(existing)
-    was_resolved = (existing.get("status") or "").strip().lower() == "resolved"
+    was_resolved = existing_status == "resolved"
     reopening = normalized_status == "open" and was_resolved
+
+    if (
+        is_reopened_case
+        and role == ROLE_DEPARTMENT
+        and normalized_status in {"verified", "resolved"}
+        and not _reopened_supervisor_id(existing)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Assign a supervisor first for reopened tickets before verification or resolution",
+        )
 
     if normalized_status == "resolved":
         if role not in {ROLE_DEPARTMENT, ROLE_SUPERVISOR}:
             raise HTTPException(status_code=403, detail="Only department or supervisor can mark tickets resolved")
-        if role == ROLE_SUPERVISOR and is_reopened_case:
-            raise HTTPException(status_code=403, detail="Supervisor can only resolve new (not reopened) tickets")
+        if not _has_worker_assignment(existing):
+            raise HTTPException(status_code=400, detail="Assign workers before resolving the ticket")
     if reopening and role != ROLE_DEPARTMENT:
         raise HTTPException(status_code=403, detail="Only department can reopen resolved tickets")
     if normalized_status == "verified":
-        if role == ROLE_SUPERVISOR:
-            pass
-        elif role == ROLE_DEPARTMENT and is_reopened_case:
-            pass
-        else:
+        if role not in {ROLE_DEPARTMENT, ROLE_SUPERVISOR}:
             raise HTTPException(
                 status_code=403,
-                detail="Only supervisor can verify tickets. Department can verify reopened tickets only",
+                detail="Only department or supervisor can verify tickets",
             )
+        if existing_status == "resolved":
+            raise HTTPException(status_code=400, detail="Reopen the ticket before verifying it")
     if normalized_status in {"open", "pending", "in_progress"} and role not in {ROLE_DEPARTMENT, ROLE_SUPERVISOR}:
         raise HTTPException(status_code=403, detail="Only department or supervisor can set this status")
 
@@ -552,6 +603,31 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["lastInspectorUpdateAt"] = ""
         update["lastWorkerUpdateAt"] = ""
         update["inspectorReminderSentForDate"] = ""
+        update["workerId"] = ""
+        update["workerIds"] = []
+        update["assignees"] = []
+        update["assignedTo"] = ""
+        update["assigneeName"] = ""
+        update["assigneePhone"] = ""
+        update["assigneeEmail"] = ""
+        update["assigneeUserId"] = ""
+        update["workerSpecialization"] = ""
+        update["workerSpecializations"] = []
+        update["assignedBySupervisorId"] = ""
+        update["assignedBySupervisorName"] = ""
+        update["assignedAt"] = ""
+        update["reopenedSupervisorId"] = ""
+        update["reopenedSupervisorName"] = ""
+        update["reopenedSupervisorEmail"] = ""
+        update["reopenedSupervisorAssignedAt"] = ""
+        update["reopenedFromResolverId"] = str(existing.get("resolvedById") or "").strip()
+        update["reopenedFromResolverName"] = str(existing.get("resolvedByName") or "").strip()
+        update["reopenedFromResolverRole"] = str(existing.get("resolvedByRole") or "").strip()
+    if normalized_status == "resolved":
+        update["resolvedById"] = str(current_user.get("id") or "").strip()
+        update["resolvedByName"] = str(current_user.get("name") or current_user.get("email") or "").strip()
+        update["resolvedByRole"] = role
+        update["resolvedAt"] = now
     clear_warning = not reopening and bool(existing.get("reopenWarning"))
 
     op = {"$set": update}
@@ -577,6 +653,16 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
                     "progressSource": doc.get("progressSource"),
                     "progressConfidence": doc.get("progressConfidence"),
                     "progressUpdatedAt": doc.get("progressUpdatedAt"),
+                    "assignedTo": "",
+                    "assigneeName": "",
+                    "assigneePhone": "",
+                    "assigneeEmail": "",
+                    "assigneeUserId": "",
+                    "workerId": "",
+                    "workerIds": [],
+                    "assignees": [],
+                    "workerSpecialization": "",
+                    "workerSpecializations": [],
                 }
             )
         _sync_incident_from_ticket(
@@ -586,7 +672,15 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         _notify_ticket_update(doc)
 
         if reopening:
-            _notify_ticket_reopened(doc, current_user)
+            _notify_ticket_reopened(
+                doc,
+                current_user,
+                previous_resolver={
+                    "id": str(existing.get("resolvedById") or "").strip(),
+                    "name": str(existing.get("resolvedByName") or "").strip(),
+                    "role": str(existing.get("resolvedByRole") or "").strip(),
+                },
+            )
             _record_ticket_log(
                 "ticket_reopened_by_department",
                 doc,
@@ -618,6 +712,78 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
     return {"success": True, "data": serialize_doc(doc)}
 
 
+@router.post("/{ticket_id}/assign-supervisor")
+def assign_reopened_supervisor(
+    ticket_id: str,
+    payload: TicketAssignSupervisor,
+    current_user: dict = Depends(get_official_user),
+):
+    _ensure_roles(current_user, ROLE_DEPARTMENT)
+    existing = _get_ticket_doc(ticket_id)
+    if not _can_access_ticket(existing, current_user):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not _is_reopened_case(existing):
+        raise HTTPException(status_code=400, detail="Supervisor assignment is available only for reopened tickets")
+    if (existing.get("status") or "").strip().lower() == "resolved":
+        raise HTTPException(status_code=400, detail="Reopen the ticket before assigning a supervisor")
+
+    supervisor_doc = _find_supervisor_doc(payload.supervisorId)
+    if not supervisor_doc:
+        raise HTTPException(status_code=400, detail="Selected supervisor account not found")
+
+    supervisor_payload = serialize_doc(supervisor_doc) or {}
+    supervisor_id = str(supervisor_payload.get("id") or "").strip()
+    if not supervisor_id:
+        raise HTTPException(status_code=400, detail="Selected supervisor id is invalid")
+
+    current_department = str(current_user.get("department") or "").strip().lower()
+    supervisor_department = str(supervisor_payload.get("department") or "").strip().lower()
+    current_department_user_id = str(current_user.get("id") or "").strip()
+    supervisor_created_by_department_id = str(supervisor_payload.get("createdByDepartmentId") or "").strip()
+    creator_matches_department = bool(
+        current_department_user_id
+        and supervisor_created_by_department_id
+        and current_department_user_id == supervisor_created_by_department_id
+    )
+    if current_department and supervisor_department and current_department != supervisor_department and not creator_matches_department:
+        raise HTTPException(status_code=400, detail="Selected supervisor does not belong to your department")
+
+    supervisor_name = (
+        str(supervisor_payload.get("name") or "").strip()
+        or str(supervisor_payload.get("email") or "").strip()
+        or "Supervisor"
+    )
+    supervisor_email = str(supervisor_payload.get("email") or "").strip()
+    now = _now_iso()
+
+    op: dict = {
+        "$set": {
+            "reopenedSupervisorId": supervisor_id,
+            "reopenedSupervisorName": supervisor_name,
+            "reopenedSupervisorEmail": supervisor_email,
+            "reopenedSupervisorAssignedAt": now,
+            "updatedAt": now,
+        }
+    }
+    if payload.notes:
+        op["$push"] = {"notes": _build_note_payload(payload.notes, current_user)}
+
+    obj_id = to_object_id(ticket_id)
+    tickets.update_one({"_id": obj_id}, op)
+    doc = tickets.find_one({"_id": obj_id})
+    if doc:
+        _record_ticket_log(
+            "reopened_ticket_supervisor_assigned_by_department",
+            doc,
+            current_user,
+            details={"supervisorId": supervisor_id, "supervisorName": supervisor_name},
+        )
+        _sync_incident_from_ticket(doc, {"updatedAt": doc.get("updatedAt")})
+
+    return {"success": True, "data": serialize_doc(doc)}
+
+
 @router.post("/{ticket_id}/assign")
 def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = Depends(get_official_user)):
     existing = _get_ticket_doc(ticket_id)
@@ -625,14 +791,23 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
         raise HTTPException(status_code=403, detail="Access denied")
 
     role = _current_official_role(current_user)
-    if role == ROLE_SUPERVISOR:
-        pass
-    elif role == ROLE_DEPARTMENT and _is_reopened_case(existing):
-        pass
-    else:
+    if role not in {ROLE_SUPERVISOR, ROLE_DEPARTMENT}:
         raise HTTPException(
             status_code=403,
-            detail="Only supervisor can assign workers. Department can assign on reopened tickets only",
+            detail="Only department or supervisor can assign workers",
+        )
+
+    if (existing.get("status") or "").strip().lower() != "verified":
+        raise HTTPException(status_code=400, detail="Worker assignment is available only after ticket verification")
+
+    if _has_worker_assignment(existing):
+        raise HTTPException(status_code=400, detail="Workers are already assigned for this ticket")
+
+    is_reopened_case = _is_reopened_case(existing)
+    if is_reopened_case and role == ROLE_DEPARTMENT and not _reopened_supervisor_id(existing):
+        raise HTTPException(
+            status_code=400,
+            detail="Assign a supervisor first for reopened tickets before worker assignment",
         )
 
     assignment_worker_ids = _normalize_assignment_worker_ids(payload)
@@ -654,6 +829,7 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
         assignees.append(
             {
                 "workerId": str(worker_payload.get("id") or "").strip(),
+                "workerCode": str(worker_payload.get("workerCode") or "").strip(),
                 "name": worker_name,
                 "phone": (worker_payload.get("phone") or "").strip(),
                 "email": (worker_payload.get("email") or "").strip(),
@@ -674,7 +850,9 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
 
     update = {
         "workerId": primary_assignee.get("workerId"),
+        "workerCode": primary_assignee.get("workerCode"),
         "workerIds": [row.get("workerId") for row in assignees if row.get("workerId")],
+        "workerCodes": [row.get("workerCode") for row in assignees if row.get("workerCode")],
         "assignees": [
             {
                 **row,
@@ -712,7 +890,9 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
                 "assigneeEmail": doc.get("assigneeEmail"),
                 "assigneeUserId": doc.get("assigneeUserId"),
                 "workerId": doc.get("workerId"),
+                "workerCode": doc.get("workerCode"),
                 "workerIds": doc.get("workerIds"),
+                "workerCodes": doc.get("workerCodes"),
                 "assignees": doc.get("assignees"),
                 "workerSpecialization": doc.get("workerSpecialization"),
                 "workerSpecializations": doc.get("workerSpecializations"),
@@ -724,7 +904,7 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
             doc,
             current_user,
             details={
-                "workerIds": [row.get("workerId") for row in assignees],
+                "workerCodes": [row.get("workerCode") for row in assignees if row.get("workerCode")],
                 "workerNames": [row.get("name") for row in assignees],
                 "workerCount": len(assignees),
             },
@@ -748,7 +928,7 @@ def update_ticket_progress(
     if role == ROLE_FIELD_INSPECTOR and not _is_field_inspector_ticket_eligible(existing):
         raise HTTPException(
             status_code=400,
-            detail="Field inspector ticket window is available only after worker assignment and issue verification",
+            detail="Field inspector ticket window is available only after issue verification",
         )
 
     update_text = (payload.updateText or "").strip()

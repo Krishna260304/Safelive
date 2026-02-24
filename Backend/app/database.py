@@ -205,6 +205,11 @@ def init_db():
         users.create_index("phone", unique=True, sparse=True)
     except OperationFailure:
         pass
+
+    try:
+        users.create_index("workerCode", unique=True, sparse=True)
+    except OperationFailure:
+        pass
     
     try:
         users.create_index("userType")

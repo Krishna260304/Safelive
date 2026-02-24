@@ -77,9 +77,10 @@ export const OfficialLoginFormComponent = () => {
     try {
       const identifier = data.identifier.trim();
       const workerPhoneLogin = selectedOfficialRole === 'worker' && PHONE_PATTERN.test(identifier);
+      const normalizedIdentifier = workerPhoneLogin ? identifier : identifier.toLowerCase();
 
       const response = await authService.login({
-        ...(workerPhoneLogin ? { phone: identifier } : { email: identifier }),
+        ...(workerPhoneLogin ? { phone: normalizedIdentifier } : { email: normalizedIdentifier }),
         password: data.password,
         expectedUserType: 'official',
         expectedOfficialRole: selectedOfficialRole,

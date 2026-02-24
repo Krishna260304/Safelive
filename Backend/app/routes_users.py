@@ -1,6 +1,9 @@
 from datetime import datetime
+import re
+import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from app.auth import get_current_user, hash_password, require_official_roles
+from app.config.settings import settings
 from app.database import users
 from app.models import DepartmentOfficialCreate, UserUpdate
 from app.roles import normalize_official_role
@@ -9,6 +12,29 @@ from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/api/users")
 DEPARTMENT_MANAGED_ROLES = {"supervisor", "field_inspector"}
+DEFAULT_DEPARTMENT_FALLBACK = settings.DEFAULT_DEPARTMENT_NAME
+WORKER_CODE_PATTERN = re.compile(r"^\d{6}$")
+
+
+def _generate_worker_code() -> str:
+    for _ in range(200):
+        code = f"{secrets.randbelow(900000) + 100000:06d}"
+        if not users.find_one({"workerCode": code}, {"_id": 1}):
+            return code
+    raise HTTPException(status_code=500, detail="Unable to generate worker code right now")
+
+
+def _ensure_worker_code(worker_doc: dict) -> str:
+    existing = str(worker_doc.get("workerCode") or "").strip()
+    if WORKER_CODE_PATTERN.fullmatch(existing):
+        return existing
+
+    generated = _generate_worker_code()
+    users.update_one(
+        {"_id": worker_doc.get("_id")},
+        {"$set": {"workerCode": generated, "updatedAt": datetime.utcnow().isoformat()}},
+    )
+    return generated
 
 @router.get("/profile")
 def get_profile(current_user: dict = Depends(get_current_user)):
@@ -40,15 +66,17 @@ def list_workers(current_user: dict = Depends(require_official_roles("department
     rows = list(
         users.find(
             {"userType": "official", "officialRole": "worker"},
-            {"name": 1, "phone": 1, "email": 1, "workerSpecialization": 1},
+            {"name": 1, "phone": 1, "email": 1, "workerSpecialization": 1, "workerCode": 1},
         ).sort("name", 1)
     )
     data = []
     for row in rows:
         payload = serialize_doc(row) or {}
+        worker_code = _ensure_worker_code(row)
         data.append(
             {
                 "id": payload.get("id"),
+                "workerCode": worker_code,
                 "name": payload.get("name") or payload.get("email") or payload.get("phone"),
                 "phone": payload.get("phone"),
                 "email": payload.get("email"),
@@ -130,7 +158,7 @@ def create_managed_official(
 
     department_name = str(current_user.get("department") or "").strip()
     if not department_name:
-        department_name = "Department"
+        department_name = DEFAULT_DEPARTMENT_FALLBACK
 
     doc = {
         "name": name_value,

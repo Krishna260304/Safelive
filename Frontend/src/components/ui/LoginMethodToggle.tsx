@@ -9,12 +9,11 @@ interface LoginMethodToggleProps {
 
 export const LoginMethodToggle = ({ selectedMethod, onSelectMethod }: LoginMethodToggleProps) => {
   return (
-    <div className="relative flex bg-muted p-1 rounded-lg">
-      {}
+    <div className="relative flex rounded-lg bg-muted p-1">
       <div 
         className={cn(
-          "absolute top-1 bottom-1 w-[calc(50%-4px)] bg-card rounded-md shadow-sm transition-transform duration-300 ease-out",
-          selectedMethod === 'phone' && "translate-x-[calc(100%+8px)]"
+          "pointer-events-none absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-md bg-card shadow-sm transition-transform duration-300 ease-out",
+          selectedMethod === 'phone' && "translate-x-[calc(100%+0.5rem)]"
         )}
       />
       
@@ -22,28 +21,28 @@ export const LoginMethodToggle = ({ selectedMethod, onSelectMethod }: LoginMetho
         type="button"
         onClick={() => onSelectMethod('email')}
         className={cn(
-          "relative flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-md text-sm font-medium transition-colors duration-200",
+          "relative z-10 flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium leading-none transition-colors duration-200",
           selectedMethod === 'email' 
             ? "text-foreground" 
             : "text-muted-foreground hover:text-foreground"
         )}
       >
-        <Mail className="h-4 w-4" />
-        <span>Email</span>
+        <Mail className="h-4 w-4 shrink-0" />
+        <span className="leading-none">Email</span>
       </button>
       
       <button
         type="button"
         onClick={() => onSelectMethod('phone')}
         className={cn(
-          "relative flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-md text-sm font-medium transition-colors duration-200",
+          "relative z-10 flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium leading-none transition-colors duration-200",
           selectedMethod === 'phone' 
             ? "text-foreground" 
             : "text-muted-foreground hover:text-foreground"
         )}
       >
-        <Phone className="h-4 w-4" />
-        <span>Phone</span>
+        <Phone className="h-4 w-4 shrink-0" />
+        <span className="leading-none">Phone</span>
       </button>
     </div>
   );

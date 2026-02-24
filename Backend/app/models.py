@@ -61,6 +61,11 @@ class TicketAssign(BaseModel):
     notes: str | None = None
 
 
+class TicketAssignSupervisor(BaseModel):
+    supervisorId: str
+    notes: str | None = None
+
+
 class TicketProgressUpdate(BaseModel):
     updateText: str
 

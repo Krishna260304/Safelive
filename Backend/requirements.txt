@@ -8,3 +8,4 @@ python-multipart
 python-dotenv
 transformers
 torch
+Pillow

@@ -1,11 +1,19 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, ClipboardList, Clock, Filter, MapPin, Plus, RefreshCw } from 'lucide-react';
+import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Plus, RefreshCw } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { SettingsModal } from '@/components/SettingsModal';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
+import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { useIncidents } from '@/hooks/use-data';
 import { Incident, IncidentLogEntry, incidentService } from '@/services/incidents';
@@ -46,10 +54,57 @@ const formatActionLabel = (value?: string) => {
 
 const logbookDetailText = (details?: Record<string, unknown>) => {
   if (!details || Object.keys(details).length === 0) return 'No extra details';
-  return Object.entries(details)
+  const isHiddenDetailKey = (key: string) => {
+    const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    return normalized === 'workerid' || normalized === 'workerids';
+  };
+  const visibleEntries = Object.entries(details).filter(([key]) => !isHiddenDetailKey(key));
+  if (visibleEntries.length === 0) return 'No extra details';
+
+  return visibleEntries
     .map(([key, value]) => `${key}: ${String(value)}`)
     .join(' | ');
 };
+
+const formatLogbookDate = (value?: string): string => {
+  if (!value) return 'N/A';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const formatLogbookTime = (value?: string): string => {
+  if (!value) return 'N/A';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'N/A';
+  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+};
+
+const formatDateTime = (value?: string): string => {
+  if (!value) return 'N/A';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+};
+
+const toSafeFileToken = (value: string): string => {
+  return (value || '')
+    .split('')
+    .map((char) => (/[a-zA-Z0-9\-_]/.test(char) ? char : '_'))
+    .join('')
+    .substring(0, 32)
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
+
+const escapeHtml = (value: string): string =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
 
 const Dashboard = () => {
   const { incidents, loading, error, refetch } = useIncidents();
@@ -62,6 +117,7 @@ const Dashboard = () => {
   const [logbookIncident, setLogbookIncident] = useState<Incident | null>(null);
   const [logbookEntries, setLogbookEntries] = useState<IncidentLogEntry[]>([]);
   const [logbookError, setLogbookError] = useState<string | null>(null);
+  const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -125,6 +181,8 @@ const Dashboard = () => {
     setIsRefreshing(false);
   };
 
+  const { toast } = useToast();
+
   const handleOpenLogbook = async (incident: Incident) => {
     setLogbookIncident(incident);
     setLogbookDialogOpen(true);
@@ -140,6 +198,119 @@ const Dashboard = () => {
     }
     setLogbookLoading(false);
   };
+
+  const logbookRows = useMemo(() => {
+    return logbookEntries.map((entry) => ({
+      id: entry.id,
+      action: formatActionLabel(entry.action),
+      actor: entry.actorName || 'System',
+      actorRole: entry.actorOfficialRole || '',
+      date: formatLogbookDate(entry.createdAt),
+      time: formatLogbookTime(entry.createdAt),
+      details: logbookDetailText(entry.details),
+    }));
+  }, [logbookEntries]);
+
+  const handleDownloadLogbookPdf = useCallback(() => {
+    if (!logbookRows.length) {
+      toast({
+        title: 'No Log Entries',
+        description: 'Logbook is empty. Nothing to export.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const incidentLabel = logbookIncident ? displayIncidentId(logbookIncident) : 'incident';
+    const safeIncidentLabel = toSafeFileToken(incidentLabel);
+    const printableRows = logbookRows
+      .map(
+        (row) =>
+          `<tr><td>${escapeHtml(row.action)}</td><td>${escapeHtml(
+            row.details
+          )}<br/><span style="font-size:11px;color:#4b5563">${escapeHtml(
+            row.actor
+          )}${row.actorRole ? ` (${escapeHtml(row.actorRole)})` : ''}</span></td><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.time)}</td></tr>`
+      )
+      .join('');
+
+    const printableHtml = [
+      '<!doctype html><html><head><meta charset="utf-8" />',
+      `<title>Logbook ${escapeHtml(incidentLabel)}</title>`,
+      '<style>',
+      'body{font-family:Segoe UI,Arial,sans-serif;padding:16px;color:#111827;}',
+      'h1{font-size:16px;margin:0 0 8px;}',
+      'p{margin:0 0 12px;color:#4b5563;font-size:12px;}',
+      'table{width:100%;border-collapse:collapse;font-size:12px;}',
+      'thead th{background:#f3f4f6;color:#111827;border:1px solid #d1d5db;padding:8px;text-align:left;}',
+      'tbody td{border:1px solid #e5e7eb;padding:8px;vertical-align:top;}',
+      'tbody tr:nth-child(odd){background:#fafafa;}',
+      '</style></head><body>',
+      `<h1>Incident Logbook - ${escapeHtml(incidentLabel)}</h1>`,
+      `<p>Generated on ${escapeHtml(formatDateTime(new Date().toISOString()))}</p>`,
+      `<table><thead><tr><th>Action</th><th>Details</th><th>Date</th><th>Time</th></tr></thead><tbody>${printableRows}</tbody></table>`,
+      '</body></html>',
+    ].join('');
+
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.setAttribute('title', `logbook-print-${safeIncidentLabel}`);
+    document.body.appendChild(iframe);
+    iframe.srcdoc = printableHtml;
+    iframe.onload = () => {
+      const printWindow = iframe.contentWindow;
+      if (!printWindow) {
+        iframe.remove();
+        return;
+      }
+      printWindow.print();
+      setTimeout(() => iframe.remove(), 1000);
+    };
+  }, [logbookRows, logbookIncident, toast]);
+
+  const handleDownloadLogbookExcel = useCallback(() => {
+    if (!logbookRows.length) {
+      toast({
+        title: 'No Log Entries',
+        description: 'Logbook is empty. Nothing to export.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const incidentLabel = logbookIncident ? displayIncidentId(logbookIncident) : 'incident';
+    const safeIncidentLabel = toSafeFileToken(incidentLabel);
+
+    // Prepare data for Excel
+    const worksheetData: (string)[][] = [
+      ['Action', 'Details', 'Actor', 'Date', 'Time'],
+      ...logbookRows.map((row) => [row.action, row.details, `${row.actor}${row.actorRole ? ` (${row.actorRole})` : ''}`, row.date, row.time]),
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+
+    // Set column widths
+    worksheet['!cols'] = [
+      { wch: 20 },
+      { wch: 40 },
+      { wch: 25 },
+      { wch: 15 },
+      { wch: 10 },
+    ];
+
+    // Create workbook
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Logbook');
+
+    // Write file
+    XLSX.writeFile(workbook, `incident-logbook-${safeIncidentLabel}.xlsx`);
+  }, [logbookRows, logbookIncident, toast]);
 
   return (
     <>
@@ -442,6 +613,51 @@ const Dashboard = () => {
               Activity logbook for {logbookIncident?.title || 'incident'} ({logbookIncident ? displayIncidentId(logbookIncident) : 'N/A'}).
             </DialogDescription>
           </DialogHeader>
+          <div className="flex items-center justify-between gap-2 relative">
+            <div className="text-xs text-muted-foreground">
+              Total entries: {logbookRows.length}
+            </div>
+            <div className="relative">
+              <Button 
+                variant="outline" 
+                size="sm" 
+                disabled={logbookLoading || logbookEntries.length === 0}
+                onClick={() => setLogbookDownloadMenuOpen(!logbookDownloadMenuOpen)}
+              >
+                <Download className="h-4 w-4 mr-1" />
+                Download
+                <ChevronDown className="h-4 w-4 ml-1 opacity-60" />
+              </Button>
+              {logbookDownloadMenuOpen && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-40"
+                    onClick={() => setLogbookDownloadMenuOpen(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-1 w-40 bg-background border border-border rounded-md shadow-lg z-50">
+                    <button
+                      className="w-full text-left px-4 py-2 hover:bg-accent hover:text-accent-foreground transition-colors text-sm"
+                      onClick={() => {
+                        setLogbookDownloadMenuOpen(false);
+                        handleDownloadLogbookPdf();
+                      }}
+                    >
+                      Download PDF
+                    </button>
+                    <button
+                      className="w-full text-left px-4 py-2 hover:bg-accent hover:text-accent-foreground transition-colors text-sm border-t border-border"
+                      onClick={() => {
+                        setLogbookDownloadMenuOpen(false);
+                        handleDownloadLogbookExcel();
+                      }}
+                    >
+                      Download Excel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
           <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
             {logbookLoading && <div className="text-sm text-muted-foreground">Loading logbook...</div>}
             {!logbookLoading && logbookError && (

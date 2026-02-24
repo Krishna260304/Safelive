@@ -30,6 +30,17 @@ router = APIRouter(prefix="/api")
 LOGGER = logging.getLogger(__name__)
 INCIDENT_STATUSES = {"open", "pending", "in_progress", "resolved"}
 CRITICAL_APPROVAL_ROLES = {"supervisor", "department"}
+PRIORITY_ALIASES = {
+    "low": "low",
+    "minor": "low",
+    "medium": "medium",
+    "moderate": "medium",
+    "high": "high",
+    "major": "high",
+    "critical": "high",
+    "severe": "high",
+    "emergency": "high",
+}
 IOT_SEVERITY_ALIASES = {
     "low": "low",
     "minor": "low",
@@ -37,15 +48,14 @@ IOT_SEVERITY_ALIASES = {
     "moderate": "medium",
     "high": "high",
     "major": "high",
-    "critical": "critical",
-    "severe": "critical",
-    "emergency": "critical",
+    "critical": "high",
+    "severe": "high",
+    "emergency": "high",
 }
 IOT_PRIORITY_BY_SEVERITY = {
     "low": "low",
     "medium": "medium",
     "high": "high",
-    "critical": "critical",
 }
 
 def _now_iso():
@@ -78,6 +88,10 @@ def _normalize_iot_token(value: str | None) -> str:
 def _normalize_iot_severity(value: str | None) -> str:
     normalized = _normalize_iot_token(value)
     return IOT_SEVERITY_ALIASES.get(normalized, "high")
+
+def _normalize_priority_value(value: str | None, default: str = "medium") -> str:
+    normalized = _normalize_iot_token(value)
+    return PRIORITY_ALIASES.get(normalized, default)
 
 def _resolve_iot_priority(severity: str) -> str:
     return IOT_PRIORITY_BY_SEVERITY.get(severity, "high")
@@ -523,6 +537,8 @@ async def create_incident(
 ):
     data = incident.dict()
     images = data.pop("images", None)
+    if data.get("priority"):
+        data["priority"] = _normalize_priority_value(data.get("priority"), default="medium")
     now = _now_iso()
     incident_status = "open"
     should_alert_stakeholders = True
@@ -555,17 +571,19 @@ async def create_incident(
                 scope=data.get("scope"),
                 source=data.get("source"),
                 location=data.get("location"),
+                image_payloads=images or [],
             )
-            data["priority"] = priority_prediction.priority
+            normalized_priority = _normalize_priority_value(priority_prediction.priority, default="medium")
+            data["priority"] = normalized_priority
             data["aiPriority"] = {
-                "priority": priority_prediction.priority,
+                "priority": normalized_priority,
                 "confidence": priority_prediction.confidence,
                 "source": priority_prediction.source,
                 "evaluatedAt": now,
             }
 
-            is_critical = (priority_prediction.priority or "").strip().lower() == "critical"
-            if is_critical and settings.CRITICAL_INCIDENT_EMAIL_APPROVAL_ENABLED:
+            is_high_priority = normalized_priority == "high"
+            if is_high_priority and settings.CRITICAL_INCIDENT_EMAIL_APPROVAL_ENABLED:
                 incident_status = "pending"
                 data["pendingReason"] = "critical_email_approval_required"
                 recipients = _resolve_critical_review_recipients()
@@ -684,7 +702,7 @@ async def create_incident(
                 payload.get("title") or "",
                 payload.get("category") or "",
                 payload.get("location") or "",
-                payload.get("priority") or "critical",
+                _normalize_priority_value(payload.get("priority"), default="high"),
                 payload.get("createdAt") or now,
                 approve_url,
                 reject_url,
@@ -862,7 +880,8 @@ async def report_issue(
         raise HTTPException(status_code=400, detail="Description is too short")
 
     severity_value = _normalize_iot_severity(issue.severity)
-    priority_value = _resolve_iot_priority(severity_value)
+    fallback_priority = _resolve_iot_priority(severity_value)
+    priority_value = fallback_priority
     scope_value = _normalize_iot_token(issue.scope) or "city"
     category_value = _normalize_iot_token(issue.category) or "ai"
     device_id = _sanitize_iot_text(issue.deviceId, default="unknown-device", max_len=128)
@@ -935,6 +954,18 @@ async def report_issue(
     if sensor_type:
         title = f"IoT {sensor_type} Alert"
 
+    priority_prediction = predict_incident_priority(
+        title=title,
+        description=description,
+        category=category_value,
+        severity=severity_value,
+        scope=scope_value,
+        source=source_value,
+        location=location_value,
+        image_payloads=cleaned_images,
+    )
+    priority_value = _normalize_priority_value(priority_prediction.priority, default=fallback_priority)
+
     data = {
         "incidentId": _next_public_incident_id(now),
         "title": title,
@@ -953,6 +984,12 @@ async def report_issue(
         "updatedAt": now,
         "hasMessages": False,
         "reportedBy": _sanitize_iot_text(issue.reportedBy, default=f"IoT Device {device_id}", max_len=120),
+        "aiPriority": {
+            "priority": priority_value,
+            "confidence": priority_prediction.confidence,
+            "source": priority_prediction.source,
+            "evaluatedAt": now,
+        },
         "ingestion": {
             "receivedAt": now,
             "remoteIp": _resolve_request_ip(request),
@@ -1009,6 +1046,8 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
         if normalized_status not in INCIDENT_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
         updates["status"] = normalized_status
+    if "priority" in updates:
+        updates["priority"] = _normalize_priority_value(updates.get("priority"), default="medium")
     images = updates.pop("images", None)
     if images is not None:
         image_urls = _save_images(images)

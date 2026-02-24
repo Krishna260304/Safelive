@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import re
 import secrets
 import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -35,7 +36,8 @@ from app.roles import (
 
 router = APIRouter(prefix="/api/auth")
 LOGGER = logging.getLogger(__name__)
-DEPARTMENT_FALLBACK = "Sanitation"
+DEPARTMENT_FALLBACK = settings.DEFAULT_DEPARTMENT_NAME
+WORKER_CODE_PATTERN = re.compile(r"^\d{6}$")
 
 def _normalize_user_type(value: str | None) -> str:
     raw = (value or "").strip().lower()
@@ -83,6 +85,18 @@ def _infer_department(official_role: str | None, worker_specialization: str | No
     if "security" in specialization or "emergency" in specialization:
         return "Police"
     return DEPARTMENT_FALLBACK
+
+
+def _is_valid_worker_code(value: str | None) -> bool:
+    return bool(WORKER_CODE_PATTERN.fullmatch(str(value or "").strip()))
+
+
+def _generate_worker_code() -> str:
+    for _ in range(200):
+        code = f"{secrets.randbelow(900000) + 100000:06d}"
+        if not users.find_one({"workerCode": code}, {"_id": 1}):
+            return code
+    raise HTTPException(status_code=500, detail="Unable to generate worker code right now")
 
 
 @router.post("/register")
@@ -136,6 +150,10 @@ def register(user: RegisterModel, background_tasks: BackgroundTasks):
         data["department"] = _infer_department(normalized_official_role, normalized_worker_specialization)
     else:
         data["department"] = None
+    if normalized_user_type == "official" and normalized_official_role == "worker":
+        data["workerCode"] = _generate_worker_code()
+    else:
+        data.pop("workerCode", None)
     data["password"] = hash_password(user.password)
     data["createdAt"] = datetime.utcnow()
     data["emailVerified"] = False
@@ -182,11 +200,13 @@ def register(user: RegisterModel, background_tasks: BackgroundTasks):
 
 @router.post("/login")
 def login(user: LoginModel):
+    email_value = (user.email or "").strip().lower()
+    phone_value = (user.phone or "").strip()
     query = None
-    if user.email:
-        query = {"email": user.email}
-    elif user.phone:
-        query = {"phone": user.phone}
+    if email_value:
+        query = {"email": email_value}
+    elif phone_value:
+        query = {"phone": phone_value}
     else:
         raise HTTPException(status_code=400, detail="Email or phone required")
     db_user = users.find_one(query)
@@ -215,9 +235,15 @@ def login(user: LoginModel):
 
     expected_official_role = normalize_official_role(user.expectedOfficialRole)
     actual_official_role = normalize_official_role(db_user.get("officialRole"))
-    if expected_user_type == "official" and expected_official_role:
+    
+    # Always validate official role if user is logging in as official
+    if expected_user_type == "official":
+        if not expected_official_role:
+            raise HTTPException(status_code=400, detail="expectedOfficialRole is required for official login")
+        if not actual_official_role:
+            raise HTTPException(status_code=400, detail="User account is missing officialRole")
         if actual_official_role != expected_official_role:
-            raise HTTPException(status_code=403, detail="Use the correct official role login")
+            raise HTTPException(status_code=403, detail=f"Invalid role. This account is registered as {actual_official_role}, but you're trying to login as {expected_official_role}")
 
     if bool(db_user.get("twoFactorEnabled")):
         try:

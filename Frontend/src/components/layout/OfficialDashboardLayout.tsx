@@ -52,7 +52,12 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
   const user = authService.getCurrentUser();
   const role = toOfficialRole(user?.officialRole);
   const userName = user?.fullName || user?.name || user?.email || 'Official';
-  const userDept = user?.department || roleLabelMap[role];
+  // For supervisors and field_inspectors, always show role label
+  // For department and workers, show their department if available
+  const userDept = 
+    (role === 'supervisor' || role === 'field_inspector') 
+      ? roleLabelMap[role]
+      : (user?.department || roleLabelMap[role]);
 
   const navItems = useMemo(() => {
     const common = [

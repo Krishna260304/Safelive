@@ -356,7 +356,7 @@ def send_critical_incident_review_email(
         ("Incident ID", incident_id or "N/A"),
         ("Title", title or "N/A"),
         ("Category", category or "N/A"),
-        ("Priority", (priority or "critical").upper()),
+        ("Priority", (priority or "high").upper()),
         ("Location", location or "N/A"),
         ("Reported At", created_at or "N/A"),
     ]

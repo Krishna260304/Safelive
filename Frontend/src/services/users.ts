@@ -24,6 +24,7 @@ export interface UserProfileUpdate {
 
 export interface WorkerAccount {
   id: string;
+  workerCode?: string;
   name: string;
   phone?: string;
   email?: string;

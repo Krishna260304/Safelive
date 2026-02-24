@@ -5,6 +5,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from typing import Any
 
 from app.config.settings import settings
 
@@ -12,6 +13,10 @@ LOGGER = logging.getLogger(__name__)
 
 PROGRESS_STEPS = tuple(range(5, 101, 5))
 MIN_ZERO_SHOT_CONFIDENCE = 0.2
+PROGRESS_MODEL_FALLBACKS = (
+    "facebook/bart-large-mnli",
+    "valhalla/distilbart-mnli-12-3",
+)
 PROGRESS_LABELS = {
     step: f"{step}% completion of total field work for this ticket"
     for step in PROGRESS_STEPS
@@ -34,6 +39,25 @@ def _resolve_hf_pipeline_device() -> tuple[int, str]:
     except Exception as exc:
         LOGGER.debug("Torch CUDA detection failed for progress model, falling back to CPU: %s", exc)
     return -1, "cpu"
+
+
+def _progress_pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
+    candidates = [
+        {"device": device_id},
+        {"device": -1},
+        {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+        {"model_kwargs": {"low_cpu_mem_usage": False}},
+        {},
+    ]
+    attempts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        signature = repr(sorted(item.items()))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        attempts.append(item)
+    return attempts
 
 
 def _extract_explicit_percent(text: str) -> int | None:
@@ -124,16 +148,45 @@ class _ProgressModel:
                 from transformers import pipeline  # type: ignore
 
                 device_id, device_name = _resolve_hf_pipeline_device()
-                self._pipeline = pipeline(
-                    "zero-shot-classification",
-                    model=settings.PROGRESS_AI_MODEL,
-                    device=device_id,
-                )
-                LOGGER.info(
-                    "Ticket progress AI model loaded: %s (device=%s)",
-                    settings.PROGRESS_AI_MODEL,
-                    device_name,
-                )
+                requested_model = (settings.PROGRESS_AI_MODEL or "").strip()
+                model_candidates: list[str] = []
+                for candidate in [requested_model, *PROGRESS_MODEL_FALLBACKS]:
+                    name = (candidate or "").strip()
+                    if name and name not in model_candidates:
+                        model_candidates.append(name)
+
+                last_error: Exception | None = None
+                for model_name in model_candidates:
+                    for load_kwargs in _progress_pipeline_load_attempts(device_id):
+                        try:
+                            self._pipeline = pipeline(
+                                "zero-shot-classification",
+                                model=model_name,
+                                **load_kwargs,
+                            )
+                            loaded_device = load_kwargs.get("device", device_id)
+                            loaded_device_name = device_name if loaded_device == device_id else "cpu"
+                            LOGGER.info(
+                                "Ticket progress AI model loaded: %s (device=%s)",
+                                model_name,
+                                loaded_device_name,
+                            )
+                            return
+                        except Exception as exc:
+                            last_error = exc
+                            if "meta tensor" in str(exc).lower():
+                                LOGGER.debug(
+                                    "Meta-tensor load issue for progress model %s with args %s: %s",
+                                    model_name,
+                                    load_kwargs,
+                                    exc,
+                                )
+                            continue
+
+                self._pipeline = None
+                if last_error:
+                    raise last_error
+                raise RuntimeError("No usable progress model candidate could be loaded")
             except Exception as exc:
                 LOGGER.warning(
                     "Failed to load ticket progress AI model (%s). Falling back to heuristic scorer. Error: %s",

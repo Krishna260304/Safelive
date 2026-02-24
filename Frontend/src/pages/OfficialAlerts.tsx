@@ -16,6 +16,14 @@ const formatPriorityLabel = (priority?: string) => {
   return value.charAt(0).toUpperCase() + value.slice(1);
 };
 
+const displayAlertId = (alert: { incidentId?: string; ticketId?: string; id: string }) => {
+  const incidentId = (alert.incidentId || '').trim();
+  if (incidentId) return incidentId;
+  const ticketId = (alert.ticketId || '').trim();
+  if (ticketId) return ticketId;
+  return 'N/A';
+};
+
 export default function OfficialAlerts() {
   const { incidents, loading } = useIncidents();
   const [filter, setFilter] = useState<'all' | 'critical' | 'recent'>('all');
@@ -37,7 +45,7 @@ export default function OfficialAlerts() {
       .filter(i => i.latitude && i.longitude)
       .map(i => ({
         id: i.id,
-        entityId: i.id,
+        entityId: displayAlertId(i),
         position: { lat: i.latitude, lng: i.longitude },
         title: i.title,
         description: i.description,
@@ -118,7 +126,7 @@ export default function OfficialAlerts() {
                     <div className="flex justify-between items-start mb-1">
                       <div className="min-w-0">
                         <span className="font-semibold text-sm line-clamp-1 block">{alert.title}</span>
-                        <span className="text-[10px] text-muted-foreground">ID: {alert.id}</span>
+                        <span className="text-[10px] text-muted-foreground">ID: {displayAlertId(alert)}</span>
                       </div>
                       <span className="text-xs text-muted-foreground whitespace-nowrap ml-2">
                         {new Date(alert.createdAt || '').toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}

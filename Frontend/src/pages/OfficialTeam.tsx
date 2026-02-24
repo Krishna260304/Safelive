@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { ShieldAlert, UserPlus } from 'lucide-react';
+import { Eye, EyeOff, ShieldAlert, UserPlus } from 'lucide-react';
 import { OfficialDashboardLayout } from '@/components/layout/OfficialDashboardLayout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,6 +45,7 @@ const OfficialTeam = () => {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [address, setAddress] = useState('');
   const [pincode, setPincode] = useState('');
 
@@ -75,6 +76,7 @@ const OfficialTeam = () => {
     setEmail('');
     setPhone('');
     setPassword('');
+    setShowPassword(false);
     setAddress('');
     setPincode('');
   };
@@ -221,13 +223,24 @@ const OfficialTeam = () => {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="managed-password">Temporary Password</Label>
-                    <Input
-                      id="managed-password"
-                      type="password"
-                      value={password}
-                      onChange={(event) => setPassword(event.target.value)}
-                      placeholder="At least 8 characters"
-                    />
+                    <div className="relative">
+                      <Input
+                        id="managed-password"
+                        type={showPassword ? 'text' : 'password'}
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        placeholder="At least 8 characters"
+                        className="pr-10"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((value) => !value)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      >
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="managed-pincode">Pincode (Optional)</Label>

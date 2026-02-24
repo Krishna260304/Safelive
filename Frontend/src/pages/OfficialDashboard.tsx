@@ -4,21 +4,20 @@ import {
   CheckCircle2,
   ChevronDown,
   ClipboardList,
+  Download,
   RotateCcw,
   Search,
   UserCheck,
   Users,
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { OfficialDashboardLayout } from '@/components/layout/OfficialDashboardLayout';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
@@ -26,7 +25,7 @@ import { useTickets } from '@/hooks/use-data';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
 import { Ticket, TicketLogEntry, ticketService } from '@/services/tickets';
-import { usersService, WorkerAccount } from '@/services/users';
+import { ManagedOfficialAccount, usersService, WorkerAccount } from '@/services/users';
 import { cn } from '@/lib/utils';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -69,6 +68,35 @@ const formatDateTime = (value?: string) => {
   return parsed.toLocaleString();
 };
 
+const formatLogbookDate = (value?: string) => {
+  if (!value) return 'N/A';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const formatLogbookTime = (value?: string) => {
+  if (!value) return 'N/A';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'N/A';
+  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+};
+
+const formatActionLabel = (value?: string) => {
+  const action = (value || '').trim();
+  if (!action) return 'Ticket Activity';
+  return action
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const toLogLabel = (key: string) =>
+  key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
+
 const formatStatus = (value?: string) => {
   if ((value || '').trim().toLowerCase() === 'verified') {
     return 'IN PROGRESS';
@@ -80,18 +108,102 @@ const formatStatus = (value?: string) => {
 
 const logbookDetailText = (details: Record<string, unknown> | undefined): string => {
   if (!details || Object.keys(details).length === 0) return 'No extra details';
-  return Object.entries(details)
-    .map(([key, value]) => `${key}: ${String(value)}`)
+  const isHiddenDetailKey = (key: string) => {
+    const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    return normalized === 'workerid' || normalized === 'workerids';
+  };
+
+  const stringify = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    if (Array.isArray(value)) {
+      return value.map((item) => stringify(item)).filter(Boolean).join(', ');
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  };
+
+  const visibleEntries = Object.entries(details).filter(([key]) => !isHiddenDetailKey(key));
+  if (visibleEntries.length === 0) return 'No extra details';
+
+  return visibleEntries
+    .map(([key, value]) => `${toLogLabel(key)}: ${stringify(value)}`)
     .join(' | ');
+};
+
+const asCleanText = (value: unknown): string => String(value || '').trim();
+
+const formatLogbookDetails = (entry: TicketLogEntry): string => {
+  const action = (entry.action || '').trim().toLowerCase();
+  const details = entry.details || {};
+
+  if (action === 'reopened_ticket_supervisor_assigned_by_department') {
+    const supervisorName = asCleanText(details.supervisorName);
+    const supervisorId = asCleanText(details.supervisorId);
+    if (supervisorName && supervisorId) {
+      return `Department assigned supervisor ${supervisorName} (ID: ${supervisorId})`;
+    }
+    if (supervisorName) {
+      return `Department assigned supervisor ${supervisorName}`;
+    }
+    if (supervisorId) {
+      return `Department assigned supervisor ID ${supervisorId}`;
+    }
+    return 'Department assigned a supervisor for this reopened ticket';
+  }
+
+  const actionText = formatActionLabel(entry.action);
+  const detailText = logbookDetailText(details);
+  return detailText === 'No extra details' ? actionText : `${actionText} | ${detailText}`;
+};
+
+const workerLabel = (name?: string, workerCode?: string) => {
+  const cleanName = (name || '').trim();
+  const cleanCode = (workerCode || '').trim();
+  if (cleanName && cleanCode) return `${cleanName} (#${cleanCode})`;
+  if (cleanName) return cleanName;
+  if (cleanCode) return `#${cleanCode}`;
+  return '';
+};
+
+const resolveLogbookLocation = (entry: TicketLogEntry, ticket?: Ticket | null): string => {
+  const details = entry.details || {};
+  const locationKeys = ['location', 'ticketLocation', 'site', 'zone', 'ward'];
+  for (const key of locationKeys) {
+    const value = details[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return (ticket?.location || '').trim() || 'N/A';
+};
+
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const toSafeFileToken = (value: string) => {
+  const normalized = value.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || 'ticket';
 };
 
 const ticketWorkerNames = (ticket: Ticket): string[] => {
   if (Array.isArray(ticket.assignees) && ticket.assignees.length > 0) {
     return ticket.assignees
-      .map((row) => (row?.name || '').trim())
+      .map((row) => workerLabel(row?.name, row?.workerCode))
       .filter((value) => value.length > 0);
   }
-  if (ticket.assigneeName) return [ticket.assigneeName];
+  if (ticket.assigneeName || ticket.workerCode) {
+    const label = workerLabel(ticket.assigneeName, ticket.workerCode);
+    if (label) return [label];
+  }
   if (ticket.assignedTo) return [ticket.assignedTo];
   return [];
 };
@@ -138,18 +250,21 @@ const OfficialDashboard = () => {
   const [workers, setWorkers] = useState<WorkerAccount[]>([]);
   const [loadingWorkers, setLoadingWorkers] = useState(false);
   const [selectedWorkerByTicket, setSelectedWorkerByTicket] = useState<Record<string, string[]>>({});
+  const [supervisors, setSupervisors] = useState<ManagedOfficialAccount[]>([]);
+  const [loadingSupervisors, setLoadingSupervisors] = useState(false);
+  const [selectedSupervisorByTicket, setSelectedSupervisorByTicket] = useState<Record<string, string>>({});
 
   const [statusSubmittingId, setStatusSubmittingId] = useState<string | null>(null);
   const [assigningTicketId, setAssigningTicketId] = useState<string | null>(null);
+  const [assigningSupervisorTicketId, setAssigningSupervisorTicketId] = useState<string | null>(null);
   const [progressSubmittingId, setProgressSubmittingId] = useState<string | null>(null);
   const [progressDrafts, setProgressDrafts] = useState<Record<string, string>>({});
-  const [reopenReassignmentDoneByTicket, setReopenReassignmentDoneByTicket] = useState<Record<string, boolean>>({});
-  const [pendingWorkerAssignmentByTicket, setPendingWorkerAssignmentByTicket] = useState<Record<string, string[]>>({});
 
   const [logbookDialogOpen, setLogbookDialogOpen] = useState(false);
   const [logbookLoading, setLogbookLoading] = useState(false);
   const [logbookTicket, setLogbookTicket] = useState<Ticket | null>(null);
   const [logbookEntries, setLogbookEntries] = useState<TicketLogEntry[]>([]);
+  const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
   const [ticketDetailsDialogOpen, setTicketDetailsDialogOpen] = useState(false);
   const [ticketDetailsLoading, setTicketDetailsLoading] = useState(false);
   const [ticketDetails, setTicketDetails] = useState<Ticket | null>(null);
@@ -178,20 +293,28 @@ const OfficialDashboard = () => {
   }, [role, isTicketsPage, toast]);
 
   useEffect(() => {
-    setPendingWorkerAssignmentByTicket((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      for (const ticketId of Object.keys(prev)) {
-        const ticket = tickets.find((row) => row.id === ticketId);
-        if (!ticket) continue;
-        if (ticketWorkerIds(ticket).length > 0) {
-          delete next[ticketId];
-          changed = true;
-        }
+    if (!isTicketsPage || role !== 'department') {
+      setSupervisors([]);
+      return;
+    }
+    const loadSupervisors = async () => {
+      setLoadingSupervisors(true);
+      const response = await usersService.listManagedOfficials();
+      if (response.success && response.data) {
+        const next = response.data.filter((entry) => (entry.officialRole || '').trim().toLowerCase() === 'supervisor');
+        setSupervisors(next);
+      } else {
+        setSupervisors([]);
+        toast({
+          title: 'Supervisor List Unavailable',
+          description: response.error || 'Unable to load supervisor accounts.',
+          variant: 'destructive',
+        });
       }
-      return changed ? next : prev;
-    });
-  }, [tickets]);
+      setLoadingSupervisors(false);
+    };
+    void loadSupervisors();
+  }, [role, isTicketsPage, toast]);
 
   const filteredTickets = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -222,20 +345,144 @@ const OfficialDashboard = () => {
     return { total, open, inProgress, resolved };
   }, [tickets]);
 
+  const logbookRows = useMemo(() => {
+    return logbookEntries.map((entry) => {
+      const details = formatLogbookDetails(entry);
+      const actorName = (entry.actorName || 'System').trim();
+      const roleName = (entry.actorOfficialRole || '').trim();
+      const actor = roleName ? `${actorName} (${roleName})` : actorName;
+      return {
+        id: entry.id,
+        location: resolveLogbookLocation(entry, logbookTicket),
+        details,
+        actor,
+        date: formatLogbookDate(entry.createdAt),
+        time: formatLogbookTime(entry.createdAt),
+      };
+    });
+  }, [logbookEntries, logbookTicket]);
+
+  const downloadBlob = useCallback((filename: string, mime: string, content: string) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, []);
+
+  const handleDownloadLogbookExcel = useCallback(() => {
+    if (!logbookRows.length) {
+      toast({
+        title: 'No Log Entries',
+        description: 'Logbook is empty. Nothing to export.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const ticketLabel = logbookTicket ? displayTicketId(logbookTicket) : 'ticket';
+    const safeTicketLabel = toSafeFileToken(ticketLabel);
+    
+    // Prepare data for Excel
+    const worksheetData: (string | null)[][] = [
+      ['Location', 'Details', 'Actor', 'Date', 'Time'],
+      ...logbookRows.map((row) => [row.location, row.details, row.actor, row.date, row.time]),
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+    
+    // Set column widths
+    worksheet['!cols'] = [
+      { wch: 20 },
+      { wch: 40 },
+      { wch: 25 },
+      { wch: 15 },
+      { wch: 10 },
+    ];
+
+    // Create workbook
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Logbook');
+
+    // Write file
+    XLSX.writeFile(workbook, `ticket-logbook-${safeTicketLabel}.xlsx`);
+  }, [logbookRows, logbookTicket, toast]);
+
+  const handleDownloadLogbookPdf = useCallback(() => {
+    if (!logbookRows.length) {
+      toast({
+        title: 'No Log Entries',
+        description: 'Logbook is empty. Nothing to export.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const ticketLabel = logbookTicket ? displayTicketId(logbookTicket) : 'ticket';
+    const safeTicketLabel = toSafeFileToken(ticketLabel);
+    const printableRows = logbookRows
+      .map(
+        (row) =>
+          `<tr><td>${escapeHtml(row.location)}</td><td>${escapeHtml(
+            row.details
+          )}<br/><span style="font-size:11px;color:#4b5563">${escapeHtml(
+            row.actor
+          )}</span></td><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.time)}</td></tr>`
+      )
+      .join('');
+
+    const printableHtml = [
+      '<!doctype html><html><head><meta charset="utf-8" />',
+      `<title>Logbook ${escapeHtml(ticketLabel)}</title>`,
+      '<style>',
+      'body{font-family:Segoe UI,Arial,sans-serif;padding:16px;color:#111827;}',
+      'h1{font-size:16px;margin:0 0 8px;}',
+      'p{margin:0 0 12px;color:#4b5563;font-size:12px;}',
+      'table{width:100%;border-collapse:collapse;font-size:12px;}',
+      'thead th{background:#f3f4f6;color:#111827;border:1px solid #d1d5db;padding:8px;text-align:left;}',
+      'tbody td{border:1px solid #e5e7eb;padding:8px;vertical-align:top;}',
+      'tbody tr:nth-child(odd){background:#fafafa;}',
+      '</style></head><body>',
+      `<h1>Ticket Logbook - ${escapeHtml(ticketLabel)}</h1>`,
+      `<p>Generated on ${escapeHtml(formatDateTime(new Date().toISOString()))}</p>`,
+      `<table><thead><tr><th>Location</th><th>Details</th><th>Date</th><th>Time</th></tr></thead><tbody>${printableRows}</tbody></table>`,
+      '</body></html>',
+    ].join('');
+
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.setAttribute('title', `logbook-print-${safeTicketLabel}`);
+    document.body.appendChild(iframe);
+    iframe.srcdoc = printableHtml;
+    iframe.onload = () => {
+      const printWindow = iframe.contentWindow;
+      if (!printWindow) {
+        iframe.remove();
+        return;
+      }
+      printWindow.focus();
+      printWindow.print();
+      setTimeout(() => iframe.remove(), 1500);
+    };
+  }, [logbookRows, logbookTicket, toast]);
+
   const handleStatusChange = async (ticketId: string, status: 'resolved' | 'open' | 'verified') => {
     const previousTicket = tickets.find((ticket) => ticket.id === ticketId);
     const previousStatus = previousTicket?.status;
-    const previousReopenFlag = reopenReassignmentDoneByTicket[ticketId];
-    const previousPendingWorkerAssignment = pendingWorkerAssignmentByTicket[ticketId];
 
     patchTicket(ticketId, { status, updatedAt: new Date().toISOString() });
-    if (status === 'open') {
-      setReopenReassignmentDoneByTicket((prev) => ({ ...prev, [ticketId]: false }));
-      setPendingWorkerAssignmentByTicket((prev) => {
-        const { [ticketId]: _, ...rest } = prev;
-        return rest;
-      });
-    }
 
     setStatusSubmittingId(ticketId);
     try {
@@ -243,19 +490,6 @@ const OfficialDashboard = () => {
       if (!response.success) {
         if (previousStatus) {
           patchTicket(ticketId, { status: previousStatus });
-        }
-        setReopenReassignmentDoneByTicket((prev) => {
-          if (previousReopenFlag === undefined) {
-            const { [ticketId]: _, ...rest } = prev;
-            return rest;
-          }
-          return { ...prev, [ticketId]: previousReopenFlag };
-        });
-        if (status === 'open') {
-          setPendingWorkerAssignmentByTicket((prev) => {
-            if (!previousPendingWorkerAssignment) return prev;
-            return { ...prev, [ticketId]: previousPendingWorkerAssignment };
-          });
         }
         toast({
           title: 'Action Failed',
@@ -281,19 +515,19 @@ const OfficialDashboard = () => {
     if (workerIds.length === 0) {
       toast({
         title: 'Worker Required',
-        description: 'Select one or more registered workers from the dropdown.',
+        description: 'Select a registered worker from the dropdown.',
         variant: 'destructive',
       });
       return;
     }
 
     const previousTicket = tickets.find((row) => row.id === ticket.id);
-    const previousReopenFlag = reopenReassignmentDoneByTicket[ticket.id];
     const optimisticAssignedAt = new Date().toISOString();
     const optimisticAssignees = workerIds.map((workerId) => {
       const matchedWorker = workers.find((worker) => worker.id === workerId);
       return {
         workerId,
+        workerCode: matchedWorker?.workerCode,
         name: matchedWorker?.name || workerId,
         phone: matchedWorker?.phone,
         email: matchedWorker?.email,
@@ -311,8 +545,6 @@ const OfficialDashboard = () => {
       assigneeEmail: optimisticAssignees[0]?.email,
       updatedAt: optimisticAssignedAt,
     });
-    setPendingWorkerAssignmentByTicket((prev) => ({ ...prev, [ticket.id]: workerIds }));
-    setReopenReassignmentDoneByTicket((prev) => ({ ...prev, [ticket.id]: true }));
 
     setAssigningTicketId(ticket.id);
     try {
@@ -330,17 +562,6 @@ const OfficialDashboard = () => {
             updatedAt: previousTicket.updatedAt,
           });
         }
-        setReopenReassignmentDoneByTicket((prev) => {
-          if (previousReopenFlag === undefined) {
-            const { [ticket.id]: _, ...rest } = prev;
-            return rest;
-          }
-          return { ...prev, [ticket.id]: previousReopenFlag };
-        });
-        setPendingWorkerAssignmentByTicket((prev) => {
-          const { [ticket.id]: _, ...rest } = prev;
-          return rest;
-        });
         toast({
           title: 'Assignment Failed',
           description: response.error || 'Could not assign worker.',
@@ -352,10 +573,61 @@ const OfficialDashboard = () => {
         title: 'Workers Assigned',
         description: 'Supervisor assignment saved.',
       });
-      setReopenReassignmentDoneByTicket((prev) => ({ ...prev, [ticket.id]: true }));
       void refetchTickets(true);
     } finally {
       setAssigningTicketId(null);
+    }
+  };
+
+  const handleAssignReopenedSupervisor = async (ticket: Ticket) => {
+    const supervisorId = (selectedSupervisorByTicket[ticket.id] || '').trim();
+    if (!supervisorId) {
+      toast({
+        title: 'Supervisor Required',
+        description: 'Select a supervisor to continue this reopened ticket.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const selectedSupervisor = supervisors.find((entry) => entry.id === supervisorId);
+    patchTicket(ticket.id, {
+      reopenedSupervisorId: supervisorId,
+      reopenedSupervisorName: selectedSupervisor?.name || supervisorId,
+      reopenedSupervisorEmail: selectedSupervisor?.email,
+      reopenedSupervisorAssignedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    setAssigningSupervisorTicketId(ticket.id);
+    try {
+      const response = await ticketService.assignSupervisor(ticket.id, { supervisorId });
+      if (!response.success) {
+        patchTicket(ticket.id, {
+          reopenedSupervisorId: ticket.reopenedSupervisorId,
+          reopenedSupervisorName: ticket.reopenedSupervisorName,
+          reopenedSupervisorEmail: ticket.reopenedSupervisorEmail,
+          reopenedSupervisorAssignedAt: ticket.reopenedSupervisorAssignedAt,
+          updatedAt: ticket.updatedAt,
+        });
+        toast({
+          title: 'Supervisor Assignment Failed',
+          description: response.error || 'Could not assign supervisor for this reopened ticket.',
+          variant: 'destructive',
+        });
+        return;
+      }
+      toast({
+        title: 'Supervisor Assigned',
+        description: 'Reopened ticket has been assigned to supervisor.',
+      });
+      setSelectedSupervisorByTicket((prev) => {
+        const { [ticket.id]: _, ...rest } = prev;
+        return rest;
+      });
+      void refetchTickets(true);
+    } finally {
+      setAssigningSupervisorTicketId(null);
     }
   };
 
@@ -502,7 +774,7 @@ const OfficialDashboard = () => {
             {!ticketsLoading && filteredTickets.length === 0 && (
               <div className="text-sm text-muted-foreground">
                 {role === 'field_inspector'
-                  ? 'The field inspector ticket window will not be available until the worker is assigned and the issue is verified.'
+                  ? 'The field inspector ticket window will be available once the ticket is verified.'
                   : 'No tickets available for this role.'}
               </div>
             )}
@@ -510,11 +782,7 @@ const OfficialDashboard = () => {
             {filteredTickets.map((ticket) => {
               const progressDraft = progressDrafts[ticket.id] || '';
               const progressPercent = Number(ticket.progressPercent || 0);
-              const pendingWorkerIds = pendingWorkerAssignmentByTicket[ticket.id] || [];
-              const hasPendingWorkerAssignment = pendingWorkerIds.length > 0;
-              const assignedWorkerNames = hasPendingWorkerAssignment
-                ? pendingWorkerIds.map((workerId) => workers.find((worker) => worker.id === workerId)?.name || workerId)
-                : ticketWorkerNames(ticket);
+              const assignedWorkerNames = ticketWorkerNames(ticket);
               const hasAssignedWorker = assignedWorkerNames.length > 0;
               const preselectedWorkerIds = hasAssignedWorker ? ticketWorkerIds(ticket) : [];
               const hasLocalSelection = Object.prototype.hasOwnProperty.call(selectedWorkerByTicket, ticket.id);
@@ -528,58 +796,38 @@ const OfficialDashboard = () => {
                   ticket.reopenedBy?.name ||
                   ticket.reopenWarning
               );
-              const reopenedAtRaw = ticket.reopenedBy?.timestamp || ticket.reopenWarning?.issuedAt;
-              const reopenedAtMs = reopenedAtRaw ? new Date(reopenedAtRaw).getTime() : Number.NaN;
-              const latestAssignedAtMs = Array.isArray(ticket.assignees)
-                ? Math.max(
-                    ...ticket.assignees
-                      .map((entry) => new Date(entry?.assignedAt || '').getTime())
-                      .filter((value) => Number.isFinite(value))
-                  )
-                : Number.NaN;
-              const hasPostReopenAssignment =
-                reopenReassignmentDoneByTicket[ticket.id] === true ||
-                (Number.isFinite(reopenedAtMs) &&
-                  Number.isFinite(latestAssignedAtMs) &&
-                  latestAssignedAtMs >= reopenedAtMs);
-              const hasExplicitReopenPending = reopenReassignmentDoneByTicket[ticket.id] === false;
-              const needsReassignmentAfterReopen =
-                role === 'department' &&
-                (hasExplicitReopenPending || (isReopenedCase && !hasPostReopenAssignment));
-              const canDepartmentManageReopened =
-                role === 'department' &&
-                isReopenedCase &&
-                ticket.status !== 'resolved';
-              const isAssignmentLockedTicket = ticket.status === 'resolved';
+              const reopenedSupervisorId = (ticket.reopenedSupervisorId || '').trim();
+              const reopenedSupervisorName = (ticket.reopenedSupervisorName || '').trim();
+              const hasReopenedSupervisor = reopenedSupervisorId.length > 0;
+              const currentUserId = (user?.id || '').trim();
+              const supervisorAssignedToCurrentUser = !isReopenedCase || !reopenedSupervisorId || reopenedSupervisorId === currentUserId;
+              const isReopenedAwaitingSupervisorAssignment = role === 'department' && isReopenedCase && !hasReopenedSupervisor;
+              const isResolved = ticket.status === 'resolved';
+              const isVerified = ticket.status === 'verified';
+              const canVerifyStep = !isResolved && !isVerified;
+              const canAssignWorkersStep = !isResolved && isVerified && !hasAssignedWorker;
+              const canResolveStep = !isResolved && isVerified && hasAssignedWorker;
               const canReopen = role === 'department' && ticket.status === 'resolved';
-              const canDepartmentVerify =
-                role === 'department' &&
-                hasAssignedWorker &&
-                !needsReassignmentAfterReopen &&
-                ticket.status !== 'resolved' &&
-                ticket.status !== 'verified';
-              const canResolve =
-                role === 'department' &&
-                hasAssignedWorker &&
-                ticket.status === 'verified';
-              const canSupervisorResolve = false;
-              const canAssignWorkers =
-                ((role === 'supervisor' && !hasAssignedWorker) ||
-                  (role === 'department' && (!hasAssignedWorker || needsReassignmentAfterReopen))) &&
-                ticket.status !== 'resolved';
+              const canRoleRunWorkflow =
+                (role === 'department' || role === 'supervisor') &&
+                supervisorAssignedToCurrentUser &&
+                !isReopenedAwaitingSupervisorAssignment;
+              const canVerify = canRoleRunWorkflow && canVerifyStep;
+              const canAssignWorkers = canRoleRunWorkflow && canAssignWorkersStep;
+              const canResolve = canRoleRunWorkflow && canResolveStep;
               const fieldInspectorWindowAvailable =
-                role !== 'field_inspector' || (hasAssignedWorker && ticket.status === 'verified');
+                role !== 'field_inspector' || ticket.status === 'verified';
               const showProgressEditor =
                 isTicketsPage && (role === 'worker' || (role === 'field_inspector' && fieldInspectorWindowAvailable));
-              const showDepartmentActions = isTicketsPage && role === 'department';
+              const showOfficialActions = isTicketsPage && (role === 'department' || role === 'supervisor');
               const showLogbookAction =
                 isTicketsPage &&
                 (role === 'department' ||
                   role === 'supervisor' ||
                   role === 'worker' ||
                   role === 'field_inspector');
-              const showAssignmentSection =
-                isTicketsPage && (role === 'department' || role === 'supervisor' || canDepartmentManageReopened);
+              const showAssignmentSection = isTicketsPage && canAssignWorkers;
+              const workerAssignmentHint = workers.length === 0 ? 'No workers available for assignment right now.' : '';
 
               return (
                 <div key={ticket.id} className="rounded-xl border border-border bg-card p-4 space-y-3">
@@ -630,7 +878,7 @@ const OfficialDashboard = () => {
                     </div>
                   </div>
 
-                  {(showDepartmentActions || showLogbookAction) && (
+                  {(showOfficialActions || showLogbookAction) && (
                     <div className="flex flex-wrap items-center gap-2">
                       {showLogbookAction && (
                         <Button
@@ -642,9 +890,9 @@ const OfficialDashboard = () => {
                           LogBook
                         </Button>
                       )}
-                      {showDepartmentActions && (
+                      {showOfficialActions && (
                         <>
-                          {(canDepartmentVerify || canResolve) && (
+                          {(canVerify || canResolve) && (
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
                                 <Button variant="outline" disabled={statusSubmittingId === ticket.id}>
@@ -653,7 +901,7 @@ const OfficialDashboard = () => {
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="start">
-                                {canDepartmentVerify && (
+                                {canVerify && (
                                   <DropdownMenuItem onClick={() => void handleStatusChange(ticket.id, 'verified')}>
                                     <UserCheck className="h-4 w-4 mr-2" />
                                     Verify
@@ -672,7 +920,7 @@ const OfficialDashboard = () => {
                             <Button
                               variant="outline"
                               onClick={() => void handleStatusChange(ticket.id, 'open')}
-                              disabled={statusSubmittingId === ticket.id && ticket.status !== 'resolved'}
+                              disabled={statusSubmittingId === ticket.id}
                             >
                               <RotateCcw className="h-4 w-4 mr-1" />
                               Reopen
@@ -683,113 +931,100 @@ const OfficialDashboard = () => {
                     </div>
                   )}
 
-                  {showAssignmentSection &&
-                    (isAssignmentLockedTicket && !canAssignWorkers ? (
-                      <div className="text-xs text-muted-foreground">
-                        Worker assignment is unavailable after resolution.
+                  {role === 'department' && isReopenedAwaitingSupervisorAssignment && (
+                    <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                      <div className="space-y-1">
+                        <label className="text-xs text-muted-foreground">Assign Supervisor (Reopened Case)</label>
+                        <select
+                          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          value={selectedSupervisorByTicket[ticket.id] || ''}
+                          onChange={(event) =>
+                            setSelectedSupervisorByTicket((prev) => ({ ...prev, [ticket.id]: event.target.value }))
+                          }
+                          disabled={loadingSupervisors || assigningSupervisorTicketId === ticket.id}
+                        >
+                          <option value="">Select supervisor</option>
+                          {supervisors.map((entry) => (
+                            <option key={entry.id} value={entry.id}>
+                              {entry.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
-                    ) : canAssignWorkers ? (
-                      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-                        <div className="space-y-1">
-                          <label className="text-xs text-muted-foreground">Assign Workers</label>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                className="h-10 w-full justify-between text-left font-normal"
-                                disabled={
-                                  !canAssignWorkers ||
-                                  loadingWorkers ||
-                                  assigningTicketId === ticket.id
-                                }
-                              >
-                                <span className="truncate">
-                                  {selectedWorkerCount > 0
-                                    ? `${selectedWorkerCount} worker(s) selected`
-                                    : 'Select workers'}
-                                </span>
-                                <ChevronDown className="h-4 w-4 opacity-60" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent className="w-[320px] max-h-72 overflow-y-auto">
-                              <DropdownMenuLabel>Registered Workers</DropdownMenuLabel>
-                              <DropdownMenuSeparator />
-                              {workers.length === 0 ? (
-                                <div className="px-2 py-2 text-sm text-muted-foreground">No workers available</div>
-                              ) : (
-                                workers.map((worker) => {
-                                  const workerLabel = `${worker.name}${worker.workerSpecialization ? ` - ${worker.workerSpecialization}` : ''}`;
-                                  const checked = selectedWorkerIds.includes(worker.id);
-                                  return (
-                                    <DropdownMenuCheckboxItem
-                                      key={worker.id}
-                                      checked={checked}
-                                      onSelect={(event) => event.preventDefault()}
-                                      onCheckedChange={(nextChecked) => {
-                                        setSelectedWorkerByTicket((prev) => {
-                                          const current = Object.prototype.hasOwnProperty.call(prev, ticket.id)
-                                            ? prev[ticket.id] || []
-                                            : preselectedWorkerIds;
-                                          const normalized = current.map((value) => value.trim()).filter(Boolean);
-                                          let next = normalized;
-                                          if (nextChecked) {
-                                            if (!normalized.includes(worker.id)) {
-                                              next = [...normalized, worker.id];
-                                            }
-                                          } else {
-                                            next = normalized.filter((value) => value !== worker.id);
-                                          }
-                                          return { ...prev, [ticket.id]: next };
-                                        });
-                                      }}
-                                    >
-                                      {workerLabel}
-                                    </DropdownMenuCheckboxItem>
-                                  );
-                                })
-                              )}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                      <div className="flex items-center gap-2 md:justify-end">
+                        <Button
+                          variant="outline"
+                          onClick={() => void handleAssignReopenedSupervisor(ticket)}
+                          disabled={loadingSupervisors || assigningSupervisorTicketId === ticket.id}
+                        >
+                          <UserCheck className="h-4 w-4 mr-1" />
+                          Assign Supervisor
+                        </Button>
+                      </div>
+                      {(ticket.reopenWarning?.supervisorName || ticket.reopenedFromResolverName) && (
+                        <div className="md:col-span-2 text-xs text-warning">
+                          Previous resolving supervisor:{' '}
+                          {ticket.reopenWarning?.supervisorName || ticket.reopenedFromResolverName}
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 md:justify-end">
-                          <Button
-                            variant="outline"
-                            onClick={() => void handleAssignWorker(ticket)}
-                            disabled={
-                              !canAssignWorkers ||
-                              loadingWorkers ||
-                              assigningTicketId === ticket.id
-                            }
-                          >
-                            <Users className="h-4 w-4 mr-1" />
-                            {hasAssignedWorker ? 'Update Workers' : 'Assign Workers'}
-                          </Button>
-                          {canSupervisorResolve && (
-                            <Button
-                              onClick={() => void handleStatusChange(ticket.id, 'resolved')}
-                              disabled={statusSubmittingId === ticket.id}
-                            >
-                              <CheckCircle2 className="h-4 w-4 mr-1" />
-                              Resolve
-                            </Button>
-                          )}
-                        </div>
-                        {role === 'supervisor' && isReopenedCase && ticket.status !== 'resolved' && (
-                          <div className="md:col-span-2 text-xs text-muted-foreground">
-                            Reopened tickets can only be closed by department.
-                          </div>
+                      )}
+                    </div>
+                  )}
+
+                  {showAssignmentSection && (
+                    <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
+                      <div className="space-y-1">
+                        <label className="text-xs text-muted-foreground">Assign Workers</label>
+                        <select
+                          className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          value={selectedWorkerIds[0] || ''}
+                          onChange={(event) => {
+                            const workerId = (event.target.value || '').trim();
+                            setSelectedWorkerByTicket((prev) => ({
+                              ...prev,
+                              [ticket.id]: workerId ? [workerId] : [],
+                            }));
+                          }}
+                          disabled={!canRoleRunWorkflow || loadingWorkers || assigningTicketId === ticket.id}
+                        >
+                          <option value="">{loadingWorkers ? 'Loading workers...' : 'Select worker'}</option>
+                          {workers.map((worker) => (
+                            <option key={worker.id} value={worker.id}>
+                              {worker.name}
+                              {worker.workerCode ? ` (#${worker.workerCode})` : ''}
+                              {worker.workerSpecialization ? ` - ${worker.workerSpecialization}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        {selectedWorkerCount > 0 && (
+                          <div className="text-[11px] text-muted-foreground">{selectedWorkerCount} worker selected</div>
+                        )}
+                        {workerAssignmentHint && (
+                          <div className="text-[11px] text-muted-foreground">{workerAssignmentHint}</div>
                         )}
                       </div>
-                    ) : (
-                      <div className="text-xs text-muted-foreground">
-                        Workers already assigned.
+                      <div className="flex flex-wrap items-center gap-2 md:justify-end md:pt-6">
+                        <Button
+                          className="h-10"
+                          variant="outline"
+                          onClick={() => void handleAssignWorker(ticket)}
+                          disabled={!canAssignWorkers || loadingWorkers || assigningTicketId === ticket.id}
+                        >
+                          <Users className="h-4 w-4 mr-1" />
+                          Assign Workers
+                        </Button>
                       </div>
-                    ))}
+                    </div>
+                  )}
+
+                  {role === 'supervisor' && isReopenedCase && !supervisorAssignedToCurrentUser && (
+                    <div className="text-xs text-muted-foreground">
+                      Department must assign this reopened case to a supervisor before workflow can continue.
+                    </div>
+                  )}
 
                   {role === 'field_inspector' && !fieldInspectorWindowAvailable && (
                     <div className="text-xs text-muted-foreground">
-                      The field inspector ticket window will not be available until the worker is assigned and the issue is verified.
+                      The field inspector ticket window will be available once the ticket is verified.
                     </div>
                   )}
 
@@ -831,30 +1066,102 @@ const OfficialDashboard = () => {
       </OfficialDashboardLayout>
 
       <Dialog open={logbookDialogOpen} onOpenChange={setLogbookDialogOpen}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-5xl">
           <DialogHeader>
             <DialogTitle>Ticket LogBook</DialogTitle>
             <DialogDescription>
               Official activity LogBook for {logbookTicket?.title || 'ticket'}.
             </DialogDescription>
           </DialogHeader>
-          <div className="max-h-[420px] overflow-y-auto space-y-2 pr-1">
-            {logbookLoading && <div className="text-sm text-muted-foreground">Loading logbook...</div>}
-            {!logbookLoading && logbookEntries.length === 0 && (
-              <div className="text-sm text-muted-foreground">No log entries found.</div>
-            )}
-            {logbookEntries.map((entry) => (
-              <div key={entry.id} className="rounded-md border border-border p-3 text-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-medium text-foreground">{entry.action}</span>
-                  <span className="text-xs text-muted-foreground">{formatDateTime(entry.createdAt)}</span>
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  Actor: {entry.actorName || 'Unknown'} ({entry.actorOfficialRole || 'N/A'})
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">{logbookDetailText(entry.details)}</div>
-              </div>
-            ))}
+          <div className="flex items-center justify-between gap-2 relative">
+            <div className="text-xs text-muted-foreground">
+              Total updates: {logbookRows.length}
+            </div>
+            <div className="relative">
+              <Button 
+                variant="outline" 
+                size="sm" 
+                disabled={logbookLoading || logbookRows.length === 0}
+                onClick={() => setLogbookDownloadMenuOpen(!logbookDownloadMenuOpen)}
+              >
+                <Download className="h-4 w-4 mr-1" />
+                Download
+                <ChevronDown className="h-4 w-4 ml-1 opacity-60" />
+              </Button>
+              {logbookDownloadMenuOpen && (
+                <>
+                  <div 
+                    className="fixed inset-0 z-40"
+                    onClick={() => setLogbookDownloadMenuOpen(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-1 w-40 bg-background border border-border rounded-md shadow-lg z-50">
+                    <button
+                      className="w-full text-left px-4 py-2 hover:bg-accent hover:text-accent-foreground transition-colors text-sm"
+                      onClick={() => {
+                        setLogbookDownloadMenuOpen(false);
+                        handleDownloadLogbookPdf();
+                      }}
+                    >
+                      Download PDF
+                    </button>
+                    <button
+                      className="w-full text-left px-4 py-2 hover:bg-accent hover:text-accent-foreground transition-colors text-sm border-t border-border"
+                      onClick={() => {
+                        setLogbookDownloadMenuOpen(false);
+                        handleDownloadLogbookExcel();
+                      }}
+                    >
+                      Download Excel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-md border border-[#2f6f98]/25 overflow-hidden bg-[#2f6f98]/8">
+            <div className="bg-[#2f6f98] px-3 py-2 text-center text-xs font-semibold tracking-wide text-white uppercase">
+              Status
+            </div>
+            <div className="max-h-[420px] overflow-auto bg-[#2f6f98]/8">
+              <table className="w-full border-collapse text-sm bg-[#2f6f98]/8">
+                <thead className="sticky top-0 z-10 bg-[#2f6f98]/18">
+                  <tr className="text-[#1f4f6e]">
+                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Location</th>
+                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Details</th>
+                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Date</th>
+                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logbookLoading && (
+                    <tr>
+                      <td colSpan={4} className="border border-[#2f6f98]/25 px-3 py-6 text-center text-sm text-[#2f6f98]/80">
+                        Loading logbook...
+                      </td>
+                    </tr>
+                  )}
+                  {!logbookLoading && logbookRows.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="border border-[#2f6f98]/25 px-3 py-6 text-center text-sm text-[#2f6f98]/80">
+                        No log entries found.
+                      </td>
+                    </tr>
+                  )}
+                  {!logbookLoading && logbookRows.map((row, index) => (
+                    <tr key={row.id} className={index % 2 === 0 ? 'bg-[#2f6f98]/10' : 'bg-[#2f6f98]/5'}>
+                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">{row.location}</td>
+                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">
+                        <div className="text-foreground">{row.details}</div>
+                        <div className="mt-1 text-[11px] text-[#2f6f98]/80">{row.actor}</div>
+                      </td>
+                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">{row.date}</td>
+                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">{row.time}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
