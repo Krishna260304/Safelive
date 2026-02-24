@@ -5,6 +5,18 @@ import { useHeatmap, useIncidents, useTickets } from '@/hooks/use-data';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
+const displayIncidentId = (incident: { incidentId?: string; id: string }) => {
+  const formatted = (incident.incidentId || '').trim();
+  if (formatted) return formatted;
+  return incident.id;
+};
+
+const displayTicketId = (ticket: { ticketId?: string; id: string }) => {
+  const formatted = (ticket.ticketId || '').trim();
+  if (formatted) return formatted;
+  return ticket.id;
+};
+
 const OfficialMap = () => {
   const { incidents, loading: incidentsLoading } = useIncidents();
   const { tickets, loading: ticketsLoading } = useTickets();
@@ -31,7 +43,7 @@ const OfficialMap = () => {
         if (typeof incident.latitude === 'number' && typeof incident.longitude === 'number') {
           items.push({
             id: `incident-${incident.id}`,
-            entityId: incident.id,
+            entityId: displayIncidentId(incident),
             position: { lat: incident.latitude, lng: incident.longitude },
             title: incident.title || 'Incident',
             description: incident.description,
@@ -48,7 +60,7 @@ const OfficialMap = () => {
         if (typeof ticket.latitude === 'number' && typeof ticket.longitude === 'number') {
           items.push({
             id: `ticket-${ticket.id}`,
-            entityId: ticket.incidentId || ticket.id,
+            entityId: displayTicketId(ticket),
             position: { lat: ticket.latitude, lng: ticket.longitude },
             title: ticket.title || 'Ticket',
             description: ticket.description,

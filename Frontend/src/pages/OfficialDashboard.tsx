@@ -321,6 +321,9 @@ const OfficialDashboard = () => {
     if (!term) return tickets;
     return tickets.filter((ticket) =>
       [
+        displayTicketId(ticket),
+        ticket.ticketId,
+        ticket.id,
         ticket.title,
         ticket.description,
         ticket.category,
