@@ -1,0 +1,199 @@
+{
+  "users": {
+    "validator": {
+      "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["name", "email", "phone", "password", "userType", "createdAt"],
+        "properties": {
+          "name": {
+            "bsonType": "string",
+            "description": "User's full name - required"
+          },
+          "email": {
+            "bsonType": "string",
+            "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+            "description": "Valid email address - required and unique"
+          },
+          "phone": {
+            "bsonType": "string",
+            "description": "Phone number - required"
+          },
+          "password": {
+            "bsonType": "string",
+            "description": "Hashed password - required"
+          },
+          "userType": {
+            "enum": ["citizen", "official", "head_supervisor", "admin"],
+            "description": "Type of user - required"
+          },
+          "department": {
+            "enum": ["Sanitation", "Road", "Electricity", "Water", "Police"],
+            "description": "Department (required for officials)"
+          },
+          "createdAt": {
+            "bsonType": "date",
+            "description": "Account creation timestamp - required"
+          }
+        }
+      }
+    },
+    "validationLevel": "strict",
+    "validationAction": "error"
+  },
+  "incidents": {
+    "validator": {
+      "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["title", "description", "category", "location", "latitude", "longitude", "severity", "status", "createdAt", "updatedAt", "reportedBy"],
+        "properties": {
+          "title": {
+            "bsonType": "string",
+            "description": "Incident title - required"
+          },
+          "description": {
+            "bsonType": "string",
+            "description": "Detailed description - required"
+          },
+          "category": {
+            "enum": ["garbage", "pothole", "streetlight", "water", "security"],
+            "description": "Incident category - required"
+          },
+          "location": {
+            "bsonType": "string",
+            "description": "Location address - required"
+          },
+          "latitude": {
+            "bsonType": "double",
+            "minimum": -90,
+            "maximum": 90,
+            "description": "GPS latitude - required"
+          },
+          "longitude": {
+            "bsonType": "double",
+            "minimum": -180,
+            "maximum": 180,
+            "description": "GPS longitude - required"
+          },
+          "imageUrl": {
+            "bsonType": "string",
+            "description": "Image URL - optional"
+          },
+          "severity": {
+            "enum": ["low", "medium", "high"],
+            "description": "Incident severity - required"
+          },
+          "status": {
+            "enum": ["open", "in_progress", "resolved"],
+            "description": "Current status - required"
+          },
+          "createdAt": {
+            "bsonType": "date",
+            "description": "Creation timestamp - required"
+          },
+          "updatedAt": {
+            "bsonType": "date",
+            "description": "Last update timestamp - required"
+          },
+          "reportedBy": {
+            "bsonType": "objectId",
+            "description": "User ID who reported - required"
+          }
+        }
+      }
+    },
+    "validationLevel": "strict",
+    "validationAction": "error"
+  },
+  "tickets": {
+    "validator": {
+      "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["incidentId", "department", "assignedTo", "priority", "status", "createdAt", "updatedAt"],
+        "properties": {
+          "incidentId": {
+            "bsonType": "objectId",
+            "description": "Related incident ID - required"
+          },
+          "department": {
+            "enum": ["Sanitation", "Road", "Electricity", "Water", "Police"],
+            "description": "Assigned department - required"
+          },
+          "assignedTo": {
+            "bsonType": "string",
+            "description": "Assigned official - required"
+          },
+          "priority": {
+            "enum": ["low", "medium", "high"],
+            "description": "Ticket priority - required"
+          },
+          "status": {
+            "enum": ["open", "in_progress", "resolved"],
+            "description": "Ticket status - required"
+          },
+          "notes": {
+            "bsonType": "string",
+            "description": "Additional notes - optional"
+          },
+          "resolvedAt": {
+            "bsonType": "date",
+            "description": "Resolution timestamp - optional"
+          },
+          "createdAt": {
+            "bsonType": "date",
+            "description": "Creation timestamp - required"
+          },
+          "updatedAt": {
+            "bsonType": "date",
+            "description": "Last update timestamp - required"
+          }
+        }
+      }
+    },
+    "validationLevel": "strict",
+    "validationAction": "error"
+  },
+  "notifications": {
+    "validator": {
+      "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["userId", "type", "title", "message", "read", "createdAt"],
+        "properties": {
+          "userId": {
+            "bsonType": "objectId",
+            "description": "Target user ID - required"
+          },
+          "type": {
+            "enum": ["incident_created", "incident_updated", "ticket_assigned", "ticket_resolved", "system"],
+            "description": "Notification type - required"
+          },
+          "title": {
+            "bsonType": "string",
+            "description": "Notification title - required"
+          },
+          "message": {
+            "bsonType": "string",
+            "description": "Notification message - required"
+          },
+          "incidentId": {
+            "bsonType": "objectId",
+            "description": "Related incident ID - optional"
+          },
+          "ticketId": {
+            "bsonType": "objectId",
+            "description": "Related ticket ID - optional"
+          },
+          "read": {
+            "bsonType": "bool",
+            "description": "Read status - required"
+          },
+          "createdAt": {
+            "bsonType": "date",
+            "description": "Creation timestamp - required"
+          }
+        }
+      }
+    },
+    "validationLevel": "strict",
+    "validationAction": "error"
+  }
+}
