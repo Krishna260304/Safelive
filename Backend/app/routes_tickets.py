@@ -183,7 +183,8 @@ def _supervisor_can_handle_ticket(doc: dict, supervisor_user_id: str | None) -> 
 
 
 def _is_field_inspector_ticket_eligible(doc: dict) -> bool:
-    return _is_verified_ticket(doc)
+    status = (doc.get("status") or "").strip().lower()
+    return status in {"verified", "in_progress"}
 
 
 def _resolve_ticket_reporter_email(doc: dict) -> str | None:
@@ -603,6 +604,7 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["lastInspectorUpdateAt"] = ""
         update["lastWorkerUpdateAt"] = ""
         update["inspectorReminderSentForDate"] = ""
+        # Clear current worker assignments - supervisor must reassign after reopening
         update["workerId"] = ""
         update["workerIds"] = []
         update["assignees"] = []
@@ -620,6 +622,7 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["reopenedSupervisorName"] = ""
         update["reopenedSupervisorEmail"] = ""
         update["reopenedSupervisorAssignedAt"] = ""
+        # Preserve historical resolver information for audit trail
         update["reopenedFromResolverId"] = str(existing.get("resolvedById") or "").strip()
         update["reopenedFromResolverName"] = str(existing.get("resolvedByName") or "").strip()
         update["reopenedFromResolverRole"] = str(existing.get("resolvedByRole") or "").strip()
@@ -949,7 +952,7 @@ def update_ticket_progress(
         "updatedAt": now,
     }
     previous_status = (existing.get("status") or "").strip().lower()
-    if previous_status in {"open", "pending"}:
+    if previous_status in {"open", "pending", "verified"}:
         set_payload["status"] = "in_progress"
     if role == ROLE_FIELD_INSPECTOR:
         set_payload["lastInspectorUpdateAt"] = now
