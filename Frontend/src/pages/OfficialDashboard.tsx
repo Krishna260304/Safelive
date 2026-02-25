@@ -777,7 +777,7 @@ const OfficialDashboard = () => {
             {!ticketsLoading && filteredTickets.length === 0 && (
               <div className="text-sm text-muted-foreground">
                 {role === 'field_inspector'
-                  ? 'The field inspector ticket window will be available once the ticket is verified.'
+                  ? 'No tickets available for this role right now.'
                   : 'No tickets available for this role.'}
               </div>
             )}
@@ -819,7 +819,7 @@ const OfficialDashboard = () => {
               const canAssignWorkers = canRoleRunWorkflow && canAssignWorkersStep;
               const canResolve = canRoleRunWorkflow && canResolveStep;
               const fieldInspectorWindowAvailable =
-                role !== 'field_inspector' || ticket.status === 'verified';
+                role !== 'field_inspector' || ['verified', 'in_progress'].includes(ticket.status);
               const showProgressEditor =
                 isTicketsPage && role === 'field_inspector' && fieldInspectorWindowAvailable;
               const showOfficialActions = isTicketsPage && (role === 'department' || role === 'supervisor');
@@ -1027,7 +1027,7 @@ const OfficialDashboard = () => {
 
                   {role === 'field_inspector' && !fieldInspectorWindowAvailable && (
                     <div className="text-xs text-muted-foreground">
-                      The field inspector ticket window will be available once the ticket is verified.
+                      Field inspector updates are paused only when a ticket is resolved.
                     </div>
                   )}
 

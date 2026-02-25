@@ -138,9 +138,8 @@ const Dashboard = () => {
     const open = incidents.filter((i) => i.status === 'open' || i.status === 'pending').length;
     const inProgress = incidents.filter((i) => i.status === 'in_progress').length;
     const resolved = incidents.filter((i) => i.status === 'resolved').length;
-    const critical = incidents.filter((i) => i.priority === 'critical').length;
     const high = incidents.filter((i) => i.priority === 'high').length;
-    return { total, open, inProgress, resolved, critical, high };
+    return { total, open, inProgress, resolved, high };
   }, [incidents]);
 
   // Data for status pie chart
@@ -343,7 +342,7 @@ const Dashboard = () => {
           </div>
 
           {/* Stats Cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
             <div className="p-4 bg-card rounded-lg border border-border">
               <div className="text-xs text-muted-foreground mb-1">Total</div>
               <div className="text-2xl font-bold text-foreground">{stats.total}</div>
@@ -359,10 +358,6 @@ const Dashboard = () => {
             <div className="p-4 bg-card rounded-lg border border-border">
               <div className="text-xs text-muted-foreground mb-1">Resolved</div>
               <div className="text-2xl font-bold text-green-500">{stats.resolved}</div>
-            </div>
-            <div className="p-4 bg-card rounded-lg border border-border">
-              <div className="text-xs text-muted-foreground mb-1">Critical</div>
-              <div className="text-2xl font-bold text-red-500">{stats.critical}</div>
             </div>
             <div className="p-4 bg-card rounded-lg border border-border">
               <div className="text-xs text-muted-foreground mb-1">High Priority</div>

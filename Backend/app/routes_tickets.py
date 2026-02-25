@@ -80,7 +80,7 @@ def _ticket_scope_query(current_user: dict) -> dict:
                     {"fieldInspectorId": ""},
                 ]
             },
-            {"status": "verified"},
+            {"status": {"$in": ["verified", "in_progress"]}},
         )
     return {}
 
