@@ -314,6 +314,32 @@ def _build_note_payload(note_text: str, current_user: dict):
     }
 
 
+def _update_latest_inspector_note(
+    notes: list[dict] | None,
+    user_id: str,
+    note_text: str,
+    edited_at: str,
+):
+    if not isinstance(notes, list) or not user_id:
+        return None
+    updated = list(notes)
+    for index in range(len(updated) - 1, -1, -1):
+        note = updated[index]
+        if not isinstance(note, dict):
+            continue
+        if str(note.get("by") or "").strip() != user_id:
+            continue
+        existing_text = (note.get("note") or "").strip().lower()
+        if not existing_text.startswith("field inspector update"):
+            continue
+        next_note = dict(note)
+        next_note["note"] = note_text
+        next_note["editedAt"] = edited_at
+        updated[index] = next_note
+        return updated
+    return None
+
+
 def _extract_worker_ids_from_ticket(doc: dict) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
@@ -937,6 +963,7 @@ def update_ticket_progress(
     update_text = (payload.updateText or "").strip()
     if len(update_text) < 5:
         raise HTTPException(status_code=400, detail="updateText must be at least 5 characters")
+    edit_requested = bool(payload.editLastUpdate and role == ROLE_FIELD_INSPECTOR)
 
     prediction = predict_ticket_progress(update_text)
     now = _now_iso()
@@ -962,17 +989,31 @@ def update_ticket_progress(
     if role == ROLE_WORKER:
         set_payload["lastWorkerUpdateAt"] = now
 
-    note_prefix = "Field Inspector update" if role == ROLE_FIELD_INSPECTOR else "Worker update"
-    note_text = f"{note_prefix}: {update_text} ({progress_percent}%)"
+    note_label = "Field Inspector update" if role == ROLE_FIELD_INSPECTOR else "Worker update"
+    current_user_id = str(current_user.get("id") or "").strip()
+    note_text = f"{note_label}: {update_text} ({progress_percent}%)"
+    updated_notes = None
+    if edit_requested:
+        edited_label = f"{note_label} (edited)"
+        note_text = f"{edited_label}: {update_text} ({progress_percent}%)"
+        updated_notes = _update_latest_inspector_note(
+            existing.get("notes"),
+            current_user_id,
+            note_text,
+            now,
+        )
+        if not updated_notes:
+            edit_requested = False
+            note_text = f"{note_label}: {update_text} ({progress_percent}%)"
 
     obj_id = to_object_id(ticket_id)
-    tickets.update_one(
-        {"_id": obj_id},
-        {
-            "$set": set_payload,
-            "$push": {"notes": _build_note_payload(note_text, current_user)},
-        },
-    )
+    update_ops = {"$set": set_payload}
+    if edit_requested and updated_notes is not None:
+        update_ops["$set"]["notes"] = updated_notes
+    else:
+        update_ops["$push"] = {"notes": _build_note_payload(note_text, current_user)}
+
+    tickets.update_one({"_id": obj_id}, update_ops)
     doc = tickets.find_one({"_id": obj_id})
     if doc:
         incident_updates = {
@@ -988,7 +1029,10 @@ def update_ticket_progress(
             doc,
             incident_updates,
         )
-        action = "field_inspector_progress_update" if role == ROLE_FIELD_INSPECTOR else "worker_progress_update"
+        if role == ROLE_FIELD_INSPECTOR:
+            action = "field_inspector_progress_update_edited" if edit_requested else "field_inspector_progress_update"
+        else:
+            action = "worker_progress_update"
         _record_ticket_log(
             action,
             doc,
@@ -998,6 +1042,7 @@ def update_ticket_progress(
                 "progressConfidence": doc.get("progressConfidence"),
                 "progressSource": doc.get("progressSource"),
                 "updateText": update_text,
+                "edited": edit_requested,
             },
         )
     return {"success": True, "data": serialize_doc(doc)}

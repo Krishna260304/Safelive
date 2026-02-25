@@ -178,6 +178,21 @@ def _can_access_incident(doc: dict, user: dict):
         return True
     return False
 
+def _ticket_status_for_incident(doc: dict) -> str:
+    incident_object_id = doc.get("_id")
+    incident_id = str(incident_object_id) if incident_object_id is not None else ""
+    if not incident_id:
+        return ""
+    ticket_doc = tickets.find_one({"incidentId": incident_id}, {"status": 1})
+    return (ticket_doc or {}).get("status", "").strip().lower()
+
+def _reporter_edit_locked(doc: dict) -> bool:
+    incident_status = (doc.get("status") or "").strip().lower()
+    if incident_status in {"verified", "in_progress", "resolved"}:
+        return True
+    ticket_status = _ticket_status_for_incident(doc)
+    return ticket_status in {"verified", "in_progress", "resolved"}
+
 def _notify_new_issue(description: str, lat: float | None, lon: float | None):
     try:
         send_alert_email(description, lat, lon)
@@ -1038,9 +1053,26 @@ async def report_issue(
 
 @router.put("/incidents/{incident_id}")
 @router.put("/issues/{incident_id}")
-def update_incident(incident_id: str, incident: IncidentUpdate, current_user: dict = Depends(get_official_user)):
-    _ = _get_incident_doc(incident_id)
+def update_incident(incident_id: str, incident: IncidentUpdate, current_user: dict = Depends(get_current_user)):
+    existing_doc = _get_incident_doc(incident_id)
+    is_official_user = _is_official(current_user)
     updates = incident.dict(exclude_unset=True, exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    if not is_official_user:
+        if not _can_access_incident(existing_doc, current_user):
+            raise HTTPException(status_code=403, detail="Access denied")
+        if _reporter_edit_locked(existing_doc):
+            raise HTTPException(status_code=403, detail="Incident can no longer be edited after verification")
+        allowed_fields = {"title", "description", "category", "location", "latitude", "longitude", "images"}
+        disallowed_fields = sorted([key for key in updates.keys() if key not in allowed_fields])
+        if disallowed_fields:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Local users can only edit basic details before verification: {', '.join(disallowed_fields)}",
+            )
+
     if "status" in updates:
         normalized_status = _normalize_incident_status(updates.get("status"))
         if normalized_status not in INCIDENT_STATUSES:
@@ -1055,7 +1087,7 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
             updates["imageUrls"] = image_urls
             updates["imageUrl"] = image_urls[0]
     updates["updatedAt"] = _now_iso()
-    obj_id = to_object_id(incident_id)
+    obj_id = existing_doc.get("_id")
     incidents.update_one({"_id": obj_id}, {"$set": updates})
     doc = incidents.find_one({"_id": obj_id})
     if doc:

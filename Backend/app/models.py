@@ -68,6 +68,7 @@ class TicketAssignSupervisor(BaseModel):
 
 class TicketProgressUpdate(BaseModel):
     updateText: str
+    editLastUpdate: bool | None = None
 
 class MessageCreate(BaseModel):
     message: str

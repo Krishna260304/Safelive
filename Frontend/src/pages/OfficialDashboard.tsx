@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ClipboardList,
   Download,
+  Pencil,
   RotateCcw,
   Search,
   UserCheck,
@@ -259,6 +260,7 @@ const OfficialDashboard = () => {
   const [assigningSupervisorTicketId, setAssigningSupervisorTicketId] = useState<string | null>(null);
   const [progressSubmittingId, setProgressSubmittingId] = useState<string | null>(null);
   const [progressDrafts, setProgressDrafts] = useState<Record<string, string>>({});
+  const [editingProgressByTicket, setEditingProgressByTicket] = useState<Record<string, boolean>>({});
 
   const [logbookDialogOpen, setLogbookDialogOpen] = useState(false);
   const [logbookLoading, setLogbookLoading] = useState(false);
@@ -634,6 +636,24 @@ const OfficialDashboard = () => {
     }
   };
 
+  const handleStartEditProgress = useCallback((ticket: Ticket) => {
+    setProgressDrafts((prev) => ({ ...prev, [ticket.id]: ticket.progressSummary || '' }));
+    setEditingProgressByTicket((prev) => ({ ...prev, [ticket.id]: true }));
+  }, []);
+
+  const handleCancelEditProgress = useCallback((ticketId: string) => {
+    setEditingProgressByTicket((prev) => {
+      const next = { ...prev };
+      delete next[ticketId];
+      return next;
+    });
+    setProgressDrafts((prev) => {
+      const next = { ...prev };
+      delete next[ticketId];
+      return next;
+    });
+  }, []);
+
   const handleProgressUpdate = async (ticketId: string) => {
     const updateText = (progressDrafts[ticketId] || '').trim();
     if (updateText.length < 5) {
@@ -644,10 +664,14 @@ const OfficialDashboard = () => {
       });
       return;
     }
+    const isEditing = Boolean(editingProgressByTicket[ticketId]);
 
     setProgressSubmittingId(ticketId);
     try {
-      const response = await ticketService.updateProgress(ticketId, { updateText });
+      const response = await ticketService.updateProgress(ticketId, {
+        updateText,
+        editLastUpdate: isEditing,
+      });
       if (!response.success) {
         toast({
           title: 'Update Failed',
@@ -657,10 +681,21 @@ const OfficialDashboard = () => {
         return;
       }
       toast({
-        title: 'Progress Updated',
-        description: 'Daily progress update saved successfully.',
+        title: isEditing ? 'Update Edited' : 'Progress Updated',
+        description: isEditing
+          ? 'Your previous field update has been edited successfully.'
+          : 'Daily progress update saved successfully.',
       });
-      setProgressDrafts((prev) => ({ ...prev, [ticketId]: '' }));
+      setProgressDrafts((prev) => {
+        const next = { ...prev };
+        delete next[ticketId];
+        return next;
+      });
+      setEditingProgressByTicket((prev) => {
+        const next = { ...prev };
+        delete next[ticketId];
+        return next;
+      });
       await refetchTickets();
     } finally {
       setProgressSubmittingId(null);
@@ -785,6 +820,7 @@ const OfficialDashboard = () => {
             {filteredTickets.map((ticket) => {
               const progressDraft = progressDrafts[ticket.id] || '';
               const progressPercent = Number(ticket.progressPercent || 0);
+              const isEditingProgress = Boolean(editingProgressByTicket[ticket.id]);
               const assignedWorkerNames = ticketWorkerNames(ticket);
               const hasAssignedWorker = assignedWorkerNames.length > 0;
               const preselectedWorkerIds = hasAssignedWorker ? ticketWorkerIds(ticket) : [];
@@ -1032,11 +1068,44 @@ const OfficialDashboard = () => {
                   )}
 
                   {showProgressEditor && (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       {role === 'field_inspector' && (
-                        <div className="text-xs text-muted-foreground">
-                          Daily update deadline: 6:00 PM IST | Last inspector update:{' '}
-                          {formatDateTime(ticket.lastInspectorUpdateAt)}
+                        <div className="space-y-1">
+                          <div className="text-xs text-muted-foreground">
+                            Daily update deadline: 6:00 PM IST | Last inspector update:{' '}
+                            {formatDateTime(ticket.lastInspectorUpdateAt)}
+                          </div>
+                          {ticket.progressSummary && (
+                            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                              {isEditingProgress ? (
+                                <>
+                                  <span className="text-primary font-medium">Editing last update</span>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2"
+                                    onClick={() => handleCancelEditProgress(ticket.id)}
+                                    disabled={progressSubmittingId === ticket.id}
+                                  >
+                                    Cancel edit
+                                  </Button>
+                                </>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-primary"
+                                  onClick={() => handleStartEditProgress(ticket)}
+                                  disabled={progressSubmittingId === ticket.id}
+                                >
+                                  <Pencil className="h-3.5 w-3.5 mr-1" />
+                                  Edit last update
+                                </Button>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                       <div className="grid gap-2 md:grid-cols-[1fr_auto]">
@@ -1045,14 +1114,18 @@ const OfficialDashboard = () => {
                           onChange={(event) =>
                             setProgressDrafts((prev) => ({ ...prev, [ticket.id]: event.target.value }))
                           }
-                          placeholder="Enter today field inspection update..."
+                          placeholder={
+                            isEditingProgress
+                              ? 'Edit your previous field inspection update...'
+                              : 'Enter today field inspection update...'
+                          }
                         />
                         <Button
                           onClick={() => void handleProgressUpdate(ticket.id)}
                           disabled={progressSubmittingId === ticket.id}
                         >
                           <AlertCircle className="h-4 w-4 mr-1" />
-                          Submit Update
+                          {isEditingProgress ? 'Save Changes' : 'Submit Update'}
                         </Button>
                       </div>
                     </div>

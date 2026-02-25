@@ -103,6 +103,7 @@ export interface AssignSupervisorData {
 
 export interface ProgressUpdateData {
   updateText: string;
+  editLastUpdate?: boolean;
 }
 
 export interface TicketLogEntry {

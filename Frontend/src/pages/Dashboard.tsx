@@ -1,21 +1,19 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Plus, RefreshCw } from 'lucide-react';
+import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Pencil, Plus, RefreshCw } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { SettingsModal } from '@/components/SettingsModal';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { useIncidents } from '@/hooks/use-data';
+import { authService } from '@/services/auth';
 import { Incident, IncidentLogEntry, incidentService } from '@/services/incidents';
 import {
   PieChart,
@@ -41,6 +39,19 @@ const statusStyles: Record<string, string> = {
   verified: 'badge-success',
   rejected: 'badge-destructive',
 };
+
+const incidentCategories = [
+  { value: 'pothole', label: 'Pothole / Road Damage' },
+  { value: 'waterlogging', label: 'Waterlogging' },
+  { value: 'garbage', label: 'Garbage / Sanitation' },
+  { value: 'streetlight', label: 'Streetlight Issue' },
+  { value: 'water_leakage', label: 'Water Leakage' },
+  { value: 'electricity', label: 'Electricity Issue' },
+  { value: 'fire', label: 'Fire Incident' },
+  { value: 'drainage', label: 'Drainage / Sewer' },
+  { value: 'safety', label: 'Safety / Security' },
+  { value: 'other', label: 'Other' },
+] as const;
 
 const displayIncidentId = (incident: { incidentId?: string; id: string }) => (incident.incidentId || incident.id);
 
@@ -108,10 +119,21 @@ const escapeHtml = (value: string): string =>
 
 const Dashboard = () => {
   const { incidents, loading, error, refetch } = useIncidents();
+  const currentUser = authService.getCurrentUser();
+  const isLocalUser = currentUser?.userType === 'citizen';
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingIncident, setEditingIncident] = useState<Incident | null>(null);
+  const [editForm, setEditForm] = useState({
+    title: '',
+    description: '',
+    category: '',
+    location: '',
+  });
+  const [editSaving, setEditSaving] = useState(false);
   const [logbookDialogOpen, setLogbookDialogOpen] = useState(false);
   const [logbookLoading, setLogbookLoading] = useState(false);
   const [logbookIncident, setLogbookIncident] = useState<Incident | null>(null);
@@ -181,6 +203,90 @@ const Dashboard = () => {
   };
 
   const { toast } = useToast();
+
+  const canEditIncident = useCallback((incident: Incident) => {
+    if (!isLocalUser) return false;
+    const status = (incident.status || '').toLowerCase();
+    if (status === 'verified' || status === 'in_progress' || status === 'resolved') {
+      return false;
+    }
+    if (!currentUser?.id) return true;
+    return !incident.reporterId || incident.reporterId === currentUser.id;
+  }, [currentUser?.id, isLocalUser]);
+
+  const handleOpenEditIncident = useCallback((incident: Incident) => {
+    if (!canEditIncident(incident)) {
+      return;
+    }
+    setEditingIncident(incident);
+    setEditForm({
+      title: incident.title || '',
+      description: incident.description || '',
+      category: incident.category || '',
+      location: incident.location || '',
+    });
+    setEditDialogOpen(true);
+  }, [canEditIncident]);
+
+  const handleSaveEditIncident = useCallback(async () => {
+    if (!editingIncident) return;
+
+    const title = editForm.title.trim();
+    const category = editForm.category.trim();
+    const location = editForm.location.trim();
+    const description = editForm.description.trim();
+
+    if (title.length < 10) {
+      toast({
+        title: 'Title Too Short',
+        description: 'Title must be at least 10 characters.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (!category) {
+      toast({
+        title: 'Category Required',
+        description: 'Please select a category.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (location.length < 5) {
+      toast({
+        title: 'Location Required',
+        description: 'Please enter a valid location.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setEditSaving(true);
+    const response = await incidentService.updateIncident(editingIncident.id, {
+      title,
+      description,
+      category,
+      location,
+    });
+
+    if (response.success) {
+      toast({
+        title: 'Incident Updated',
+        description: 'Your incident details were updated successfully.',
+      });
+      setEditDialogOpen(false);
+      setEditingIncident(null);
+      setSelectedId(editingIncident.id);
+      await refetch();
+    } else {
+      toast({
+        title: 'Update Failed',
+        description: response.error || 'Could not update incident.',
+        variant: 'destructive',
+      });
+    }
+    setEditSaving(false);
+  }, [editForm, editingIncident, refetch, toast]);
 
   const handleOpenLogbook = async (incident: Incident) => {
     setLogbookIncident(incident);
@@ -504,18 +610,34 @@ const Dashboard = () => {
                         </div>
                       </div>
                       <div className="flex-shrink-0">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8 px-2 gap-1"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleOpenLogbook(incident);
-                          }}
-                        >
-                          <ClipboardList className="h-3.5 w-3.5" />
-                          LogBook
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          {canEditIncident(incident) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 px-2 gap-1"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleOpenEditIncident(incident);
+                              }}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              Edit
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 px-2 gap-1"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleOpenLogbook(incident);
+                            }}
+                          >
+                            <ClipboardList className="h-3.5 w-3.5" />
+                            LogBook
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -544,6 +666,19 @@ const Dashboard = () => {
                     <ClipboardList className="h-4 w-4" />
                     Open LogBook
                   </Button>
+                  {canEditIncident(selected) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full gap-2"
+                      onClick={() => {
+                        handleOpenEditIncident(selected);
+                      }}
+                    >
+                      <Pencil className="h-4 w-4" />
+                      Edit Incident
+                    </Button>
+                  )}
                   <div>
                     <div className="text-xs text-muted-foreground uppercase tracking-wide">Title</div>
                     <div className="font-medium text-foreground mt-1">{selected.title}</div>
@@ -600,6 +735,89 @@ const Dashboard = () => {
           </div>
         </div>
       </DashboardLayout>
+      <Dialog
+        open={editDialogOpen}
+        onOpenChange={(open) => {
+          setEditDialogOpen(open);
+          if (!open) {
+            setEditingIncident(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Edit Incident</DialogTitle>
+            <DialogDescription>
+              Update your submitted incident details.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-incident-title">Title</Label>
+              <Input
+                id="edit-incident-title"
+                value={editForm.title}
+                onChange={(event) => setEditForm((prev) => ({ ...prev, title: event.target.value }))}
+                placeholder="Incident title"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-incident-description">Description</Label>
+              <Textarea
+                id="edit-incident-description"
+                value={editForm.description}
+                onChange={(event) => setEditForm((prev) => ({ ...prev, description: event.target.value }))}
+                placeholder="Describe the issue"
+                rows={4}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Category</Label>
+              <Select
+                value={editForm.category}
+                onValueChange={(value) => setEditForm((prev) => ({ ...prev, category: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {incidentCategories.map((category) => (
+                    <SelectItem key={category.value} value={category.value}>
+                      {category.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-incident-location">Location</Label>
+              <Textarea
+                id="edit-incident-location"
+                value={editForm.location}
+                onChange={(event) => setEditForm((prev) => ({ ...prev, location: event.target.value }))}
+                placeholder="Incident location"
+                rows={2}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setEditDialogOpen(false);
+                  setEditingIncident(null);
+                }}
+                disabled={editSaving}
+              >
+                Cancel
+              </Button>
+              <Button type="button" onClick={() => void handleSaveEditIncident()} disabled={editSaving}>
+                {editSaving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={logbookDialogOpen} onOpenChange={setLogbookDialogOpen}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
