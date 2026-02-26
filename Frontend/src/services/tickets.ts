@@ -115,6 +115,7 @@ export interface TicketLogEntry {
   actorName?: string;
   actorOfficialRole?: string;
   createdAt: string;
+  summary?: string;
   details?: Record<string, unknown>;
 }
 

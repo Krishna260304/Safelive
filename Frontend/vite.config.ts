@@ -39,4 +39,15 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-charts': ['recharts'],
+          'vendor-maps': ['leaflet', 'react-leaflet', 'leaflet.heat'],
+        }
+      }
+    }
+  }
 });

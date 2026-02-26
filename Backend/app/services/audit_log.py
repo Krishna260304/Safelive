@@ -4,6 +4,7 @@ from datetime import datetime
 
 from app.database import incident_logs
 from app.roles import normalize_official_role
+from app.services.logbook_sentence_ai import generate_logbook_sentence
 from app.utils import serialize_list
 
 
@@ -19,6 +20,7 @@ def append_incident_log(
     actor: dict | None,
     details: dict | None = None,
 ) -> None:
+    summary = generate_logbook_sentence(action, details, actor)
     log_doc = {
         "ticketId": (ticket_id or "").strip() or None,
         "incidentId": (incident_id or "").strip() or None,
@@ -27,6 +29,7 @@ def append_incident_log(
         "actorName": (actor or {}).get("name") or (actor or {}).get("email") or (actor or {}).get("phone"),
         "actorOfficialRole": normalize_official_role((actor or {}).get("officialRole")),
         "createdAt": _now_iso(),
+        "summary": summary,
         "details": details or {},
     }
     incident_logs.insert_one(log_doc)

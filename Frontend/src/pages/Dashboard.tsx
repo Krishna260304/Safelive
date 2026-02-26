@@ -312,7 +312,7 @@ const Dashboard = () => {
       actorRole: entry.actorOfficialRole || '',
       date: formatLogbookDate(entry.createdAt),
       time: formatLogbookTime(entry.createdAt),
-      details: logbookDetailText(entry.details),
+      details: (entry.summary || '').trim() || logbookDetailText(entry.details),
     }));
   }, [logbookEntries]);
 
@@ -885,7 +885,9 @@ const Dashboard = () => {
                 <div className="mt-1 text-xs text-muted-foreground">
                   By {entry.actorName || 'System'} {entry.actorOfficialRole ? `(${entry.actorOfficialRole})` : ''} on {new Date(entry.createdAt).toLocaleString()}
                 </div>
-                <div className="mt-1 text-xs text-muted-foreground">{logbookDetailText(entry.details)}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {(entry.summary || '').trim() || logbookDetailText(entry.details)}
+                </div>
               </div>
             ))}
           </div>

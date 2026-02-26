@@ -142,6 +142,10 @@ const asCleanText = (value: unknown): string => String(value || '').trim();
 const formatLogbookDetails = (entry: TicketLogEntry): string => {
   const action = (entry.action || '').trim().toLowerCase();
   const details = entry.details || {};
+  const summary = (entry.summary || '').trim();
+  if (summary) {
+    return summary;
+  }
 
   if (action === 'reopened_ticket_supervisor_assigned_by_department') {
     const supervisorName = asCleanText(details.supervisorName);

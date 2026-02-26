@@ -17,6 +17,7 @@ from app.services.priority_ai import warmup_priority_model
 from app.services.progress_ai import warmup_progress_model
 from app.services.inspector_reminder import start_inspector_reminder_worker
 from app.services.auto_progress_tracker import start_auto_progress_tracker_worker
+from app.services.logbook_sentence_ai import warmup_logbook_sentence_model
 
 app = FastAPI(title="SafeLive Smart Incident Backend")
 LOGGER = logging.getLogger(__name__)
@@ -56,10 +57,18 @@ def _warmup_progress_model_background():
         LOGGER.warning("Ticket progress model warmup failed during startup: %s", exc)
 
 
+def _warmup_logbook_model_background():
+    try:
+        warmup_logbook_sentence_model()
+    except Exception as exc:
+        LOGGER.warning("Logbook sentence model warmup failed during startup: %s", exc)
+
+
 @app.on_event("startup")
 def startup():
     init_db()
     threading.Thread(target=_warmup_priority_model_background, daemon=True).start()
     threading.Thread(target=_warmup_progress_model_background, daemon=True).start()
+    threading.Thread(target=_warmup_logbook_model_background, daemon=True).start()
     start_inspector_reminder_worker()
     start_auto_progress_tracker_worker()
