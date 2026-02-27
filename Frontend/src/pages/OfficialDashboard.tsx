@@ -136,6 +136,11 @@ const getFieldInspectorEditWindowMsLeft = (ticket: Ticket, currentUserId: string
 const isFieldInspectorEditWindowActive = (ticket: Ticket, currentUserId: string): boolean =>
   getFieldInspectorEditWindowMsLeft(ticket, currentUserId) >= 0;
 
+const isFieldInspectorUpdateLocked = (ticket?: Ticket | null): boolean => {
+  if (!ticket) return false;
+  return Boolean((ticket.updatesVerifiedAt || '').trim());
+};
+
 const LOGBOOK_ID_TOKEN_REGEX = /\b[a-f0-9]{24}\b/gi;
 
 const stripLogbookIds = (value: string): string =>
@@ -473,6 +478,7 @@ const OfficialDashboard = () => {
 
   const latestDeletableLogId = useMemo(() => {
     if (role !== 'field_inspector' || !currentUserId) return '';
+    if (isFieldInspectorUpdateLocked(logbookTicket)) return '';
     const latestEntry = logbookEntries[0];
     if (!latestEntry) return '';
     const isOwnedByInspector =
@@ -480,7 +486,7 @@ const OfficialDashboard = () => {
       (latestEntry.actorOfficialRole || '').trim() === 'field_inspector' &&
       ['field_inspector_progress_update', 'field_inspector_progress_update_edited'].includes((latestEntry.action || '').trim());
     return isOwnedByInspector ? latestEntry.id : '';
-  }, [currentUserId, logbookEntries, role]);
+  }, [currentUserId, logbookEntries, logbookTicket, role]);
 
   const logbookRows = useMemo(() => {
     return logbookEntries.map((entry) => {
@@ -773,9 +779,17 @@ const OfficialDashboard = () => {
   };
 
   const handleStartEditProgress = useCallback((ticket: Ticket) => {
+    if (isFieldInspectorUpdateLocked(ticket)) {
+      toast({
+        title: 'Edit Locked',
+        description: 'Last update cannot be edited after department/supervisor verification.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setProgressDrafts((prev) => ({ ...prev, [ticket.id]: ticket.progressSummary || '' }));
     setEditingProgressByTicket((prev) => ({ ...prev, [ticket.id]: true }));
-  }, []);
+  }, [toast]);
 
   const handleCancelEditProgress = useCallback((ticketId: string) => {
     setEditingProgressByTicket((prev) => {
@@ -801,6 +815,15 @@ const OfficialDashboard = () => {
       return;
     }
     const isEditing = Boolean(editingProgressByTicket[ticketId]);
+    const ticket = tickets.find((entry) => entry.id === ticketId);
+    if (isEditing && isFieldInspectorUpdateLocked(ticket)) {
+      toast({
+        title: 'Edit Locked',
+        description: 'Last update cannot be edited after department/supervisor verification.',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     setProgressSubmittingId(ticketId);
     try {
@@ -847,6 +870,14 @@ const OfficialDashboard = () => {
 
   const handleDeleteLogbookEntry = async (entryId: string) => {
     if (!logbookTicket) return;
+    if (isFieldInspectorUpdateLocked(logbookTicket)) {
+      toast({
+        title: 'Delete Locked',
+        description: 'Last update cannot be deleted after department/supervisor verification.',
+        variant: 'destructive',
+      });
+      return;
+    }
     if (!window.confirm('Delete this log entry? This action cannot be undone.')) return;
 
     setDeletingLogEntryId(entryId);
@@ -1047,6 +1078,7 @@ const OfficialDashboard = () => {
               const isReopenedAwaitingSupervisorAssignment = role === 'department' && isReopenedCase && !hasReopenedSupervisor;
               const isResolved = ticket.status === 'resolved';
               const isVerified = ticket.status === 'verified';
+              const inspectorEditLocked = isFieldInspectorUpdateLocked(ticket);
               const inspectorEditWindowMsLeft =
                 role === 'field_inspector' ? getFieldInspectorEditWindowMsLeft(ticket, currentUserId) : -1;
               const inspectorEditWindowActive = inspectorEditWindowMsLeft >= 0;
@@ -1302,20 +1334,27 @@ const OfficialDashboard = () => {
                                 </>
                               ) : (
                                 <>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-7 px-2 text-primary"
-                                    onClick={() => handleStartEditProgress(ticket)}
-                                    disabled={progressSubmittingId === ticket.id || !inspectorEditWindowActive}
-                                  >
-                                    <Pencil className="h-3.5 w-3.5 mr-1" />
-                                    Edit last update
-                                  </Button>
-                                  <span className="text-muted-foreground">
-                                    You can edit this update anytime
-                                  </span>
+                                  {!inspectorEditLocked && (
+                                    <>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-primary"
+                                        onClick={() => handleStartEditProgress(ticket)}
+                                        disabled={progressSubmittingId === ticket.id || !inspectorEditWindowActive}
+                                      >
+                                        <Pencil className="h-3.5 w-3.5 mr-1" />
+                                        Edit last update
+                                      </Button>
+                                      <span className="text-muted-foreground">You can edit this update anytime</span>
+                                    </>
+                                  )}
+                                  {inspectorEditLocked && (
+                                    <span className="text-muted-foreground">
+                                      Editing is locked after department/supervisor verification
+                                    </span>
+                                  )}
                                 </>
                               )}
                             </div>

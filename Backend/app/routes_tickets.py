@@ -251,6 +251,25 @@ def _is_verified_ticket(doc: dict) -> bool:
     return (doc.get("status") or "").strip().lower() == "verified"
 
 
+def _field_inspector_update_locked(doc: dict) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    if str(doc.get("updatesVerifiedAt") or "").strip():
+        return True
+    ticket_id = str(doc.get("_id") or doc.get("id") or "").strip()
+    if not ticket_id:
+        return False
+    selectors = _ticket_id_selectors(ticket_id)
+    verification_log = incident_logs.find_one(
+        {
+            "ticketId": {"$in": selectors},
+            "action": {"$in": ["ticket_verified_by_supervisor", "ticket_verified_by_department"]},
+            "details.fromStatus": "in_progress",
+        }
+    )
+    return verification_log is not None
+
+
 def _reopened_supervisor_id(doc: dict) -> str:
     return str(doc.get("reopenedSupervisorId") or "").strip()
 
@@ -782,6 +801,24 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["reopenedFromResolverId"] = str(existing.get("resolvedById") or "").strip()
         update["reopenedFromResolverName"] = str(existing.get("resolvedByName") or "").strip()
         update["reopenedFromResolverRole"] = str(existing.get("resolvedByRole") or "").strip()
+        update["verifiedAt"] = ""
+        update["verifiedById"] = ""
+        update["verifiedByName"] = ""
+        update["verifiedByRole"] = ""
+        update["updatesVerifiedAt"] = ""
+        update["updatesVerifiedById"] = ""
+        update["updatesVerifiedByName"] = ""
+        update["updatesVerifiedByRole"] = ""
+    if normalized_status == "verified":
+        update["verifiedAt"] = now
+        update["verifiedById"] = str(current_user.get("id") or "").strip()
+        update["verifiedByName"] = str(current_user.get("name") or current_user.get("email") or "").strip()
+        update["verifiedByRole"] = role
+        if existing_status == "in_progress":
+            update["updatesVerifiedAt"] = now
+            update["updatesVerifiedById"] = str(current_user.get("id") or "").strip()
+            update["updatesVerifiedByName"] = str(current_user.get("name") or current_user.get("email") or "").strip()
+            update["updatesVerifiedByRole"] = role
     if normalized_status == "resolved":
         update["resolvedById"] = str(current_user.get("id") or "").strip()
         update["resolvedByName"] = str(current_user.get("name") or current_user.get("email") or "").strip()
@@ -1101,6 +1138,11 @@ def update_ticket_progress(
     editable_log_entry = None
 
     if edit_requested:
+        if _field_inspector_update_locked(existing):
+            raise HTTPException(
+                status_code=403,
+                detail="Field inspector updates cannot be edited after department/supervisor verification",
+            )
         latest_inspector_id = str(existing.get("fieldInspectorId") or "").strip()
         if latest_inspector_id and latest_inspector_id != current_user_id:
             raise HTTPException(
@@ -1247,6 +1289,11 @@ def delete_ticket_logbook_entry(
     ticket_doc = _get_ticket_doc(ticket_id)
     if not _can_access_ticket_logbook(ticket_doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
+    if _field_inspector_update_locked(ticket_doc):
+        raise HTTPException(
+            status_code=403,
+            detail="Field inspector log updates cannot be deleted after department/supervisor verification",
+        )
 
     try:
         entry_obj_id = to_object_id(entry_id)

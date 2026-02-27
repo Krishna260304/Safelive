@@ -23,7 +23,7 @@ from app.services.report_validation_ai import validate_incident_report
 from app.services.audit_log import get_incident_logbook
 from app.config.settings import settings
 from app.issue_model import IssueIn
-from app.auth import get_current_user, get_official_user, is_official_account
+from app.auth import get_current_user, is_official_account
 from app.utils import serialize_doc, serialize_list, to_object_id
 
 router = APIRouter(prefix="/api")
@@ -212,6 +212,28 @@ def _reporter_edit_locked(doc: dict) -> bool:
         return True
     ticket_status = _ticket_status_for_incident(doc)
     return ticket_status in {"verified", "in_progress", "resolved"}
+
+
+def _reporter_delete_locked(doc: dict) -> bool:
+    incident_status = (doc.get("status") or "").strip().lower()
+    if incident_status in {"verified", "resolved"}:
+        return True
+    ticket_status = _ticket_status_for_incident(doc)
+    if ticket_status in {"verified", "resolved"}:
+        return True
+
+    incident_object_id = doc.get("_id")
+    incident_id = str(incident_object_id) if incident_object_id is not None else ""
+    if not incident_id:
+        return False
+    verification_log = incident_logs.find_one(
+        {
+            "incidentId": incident_id,
+            "action": {"$in": ["ticket_verified_by_supervisor", "ticket_verified_by_department"]},
+        },
+        {"_id": 1},
+    )
+    return bool(verification_log)
 
 def _notify_new_issue(description: str, lat: float | None, lon: float | None):
     try:
@@ -521,6 +543,7 @@ def get_incidents(current_user: dict = Depends(get_current_user)):
     data = list(incidents.find(query).sort("createdAt", -1))
     for row in data:
         row["officialActionTaken"] = _reporter_edit_locked(row)
+        row["reporterDeleteLocked"] = _reporter_delete_locked(row)
     serialized = serialize_list(data)
     safe_data = [_sanitize_incident_payload(item) for item in serialized]
     return {"success": True, "data": safe_data}
@@ -554,6 +577,7 @@ def get_incident(incident_id: str, current_user: dict = Depends(get_current_user
     if not _can_access_incident(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     doc["officialActionTaken"] = _reporter_edit_locked(doc)
+    doc["reporterDeleteLocked"] = _reporter_delete_locked(doc)
     return {"success": True, "data": _sanitize_incident_payload(serialize_doc(doc))}
 
 
@@ -1157,12 +1181,26 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
 
 @router.delete("/incidents/{incident_id}")
 @router.delete("/issues/{incident_id}")
-def delete_incident(incident_id: str, current_user: dict = Depends(get_official_user)):
-    obj_id = to_object_id(incident_id)
+def delete_incident(incident_id: str, current_user: dict = Depends(get_current_user)):
+    doc = _get_incident_doc(incident_id)
+    obj_id = doc.get("_id")
+    if not obj_id:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    if not _is_official(current_user):
+        if not _can_access_incident(doc, current_user):
+            raise HTTPException(status_code=403, detail="Access denied")
+        reporter_id = str(doc.get("reporterId") or "").strip()
+        current_user_id = str(current_user.get("id") or "").strip()
+        if reporter_id and reporter_id != current_user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        if _reporter_delete_locked(doc):
+            raise HTTPException(status_code=403, detail="Incident can no longer be deleted after verification")
+
     result = incidents.delete_one({"_id": obj_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Incident not found")
-    messages.delete_many({"incidentId": incident_id})
+    messages.delete_many({"incidentId": {"$in": [incident_id, str(obj_id), obj_id]}})
     tickets.delete_many(
         {
             "$or": [

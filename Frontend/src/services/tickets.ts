@@ -62,6 +62,14 @@ export interface Ticket {
   resolvedByName?: string;
   resolvedByRole?: string;
   resolvedAt?: string;
+  verifiedAt?: string;
+  verifiedById?: string;
+  verifiedByName?: string;
+  verifiedByRole?: string;
+  updatesVerifiedAt?: string;
+  updatesVerifiedById?: string;
+  updatesVerifiedByName?: string;
+  updatesVerifiedByRole?: string;
   reopenWarning?: {
     message: string;
     issuedAt: string;
