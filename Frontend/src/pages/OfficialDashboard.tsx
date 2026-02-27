@@ -25,6 +25,7 @@ import { Input } from '@/components/ui/input';
 import { useTickets } from '@/hooks/use-data';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
+import { incidentService } from '@/services/incidents';
 import { Ticket, TicketLogEntry, ticketService } from '@/services/tickets';
 import { ManagedOfficialAccount, usersService, WorkerAccount } from '@/services/users';
 import { cn } from '@/lib/utils';
@@ -346,6 +347,7 @@ const OfficialDashboard = () => {
   const [logbookLoading, setLogbookLoading] = useState(false);
   const [logbookTicket, setLogbookTicket] = useState<Ticket | null>(null);
   const [logbookEntries, setLogbookEntries] = useState<TicketLogEntry[]>([]);
+  const [logbookError, setLogbookError] = useState<string | null>(null);
   const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
   const [ticketDetailsDialogOpen, setTicketDetailsDialogOpen] = useState(false);
   const [ticketDetailsLoading, setTicketDetailsLoading] = useState(false);
@@ -806,17 +808,53 @@ const OfficialDashboard = () => {
     setLogbookLoading(true);
     setLogbookTicket(ticket);
     setLogbookEntries([]);
-    const response = await ticketService.getLogbook(ticket.id);
-    if (response.success && response.data) {
-      setLogbookEntries(response.data);
-    } else {
+    setLogbookError(null);
+    try {
+      const response = await ticketService.getLogbook(ticket.id);
+      if (response.success && response.data) {
+        setLogbookEntries(response.data);
+        setLogbookError(null);
+      } else {
+        const primaryError = response.error || 'Could not load LogBook.';
+        const shouldTryIncidentFallback =
+          Boolean(ticket.incidentId) &&
+          /insufficient role permissions|access denied/i.test(primaryError);
+
+        if (shouldTryIncidentFallback) {
+          const fallback = await incidentService.getLogbook(ticket.incidentId as string);
+          if (fallback.success && fallback.data) {
+            setLogbookEntries(fallback.data as TicketLogEntry[]);
+            setLogbookError(null);
+            return;
+          }
+          const fallbackError = fallback.error || primaryError;
+          setLogbookError(fallbackError);
+          toast({
+            title: 'Logbook Unavailable',
+            description: fallbackError,
+            variant: 'destructive',
+          });
+          return;
+        }
+
+        setLogbookError(primaryError);
+        toast({
+          title: 'Logbook Unavailable',
+          description: primaryError,
+          variant: 'destructive',
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not load LogBook.';
+      setLogbookError(message);
       toast({
         title: 'Logbook Unavailable',
-        description: response.error || 'Could not load LogBook.',
+        description: message,
         variant: 'destructive',
       });
+    } finally {
+      setLogbookLoading(false);
     }
-    setLogbookLoading(false);
   };
 
   const openTicketDetails = useCallback(async (ticket: Ticket) => {
@@ -1332,7 +1370,14 @@ const OfficialDashboard = () => {
                       </td>
                     </tr>
                   )}
-                  {!logbookLoading && logbookRows.length === 0 && (
+                  {!logbookLoading && logbookError && (
+                    <tr>
+                      <td colSpan={4} className="border border-[#c2cbd6] px-3 py-6 text-center text-sm text-destructive">
+                        {logbookError}
+                      </td>
+                    </tr>
+                  )}
+                  {!logbookLoading && !logbookError && logbookRows.length === 0 && (
                     <tr>
                       <td colSpan={4} className="border border-[#c2cbd6] px-3 py-6 text-center text-sm text-[#4f6174]">
                         No log entries found.

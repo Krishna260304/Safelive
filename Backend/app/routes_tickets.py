@@ -21,6 +21,12 @@ ROLE_FIELD_INSPECTOR = "field_inspector"
 ROLE_WORKER = "worker"
 TICKET_STATUSES = {"open", "pending", "in_progress", "verified", "resolved"}
 FIELD_INSPECTOR_EDIT_WINDOW_MINUTES = 10
+FIELD_INSPECTOR_VISIBLE_STATUSES = {"verified", "in_progress", "resolved"}
+FIELD_INSPECTOR_EDITABLE_STATUSES = {"verified", "in_progress"}
+FIELD_INSPECTOR_NOTE_PREFIXES = (
+    "field inspector update",
+    "field inspector progress update",
+)
 
 
 def _now_iso():
@@ -46,7 +52,8 @@ def _field_inspector_edit_window_active(last_update_at: str | None, now: datetim
     if not parsed:
         return False
     reference = now or datetime.utcnow()
-    return reference - parsed <= timedelta(minutes=FIELD_INSPECTOR_EDIT_WINDOW_MINUTES)
+    elapsed = reference - parsed
+    return timedelta(0) <= elapsed <= timedelta(minutes=FIELD_INSPECTOR_EDIT_WINDOW_MINUTES)
 
 
 def _current_official_role(current_user: dict) -> str:
@@ -103,7 +110,7 @@ def _ticket_scope_query(current_user: dict) -> dict:
                     {"fieldInspectorId": ""},
                 ]
             },
-            {"status": {"$in": ["verified", "in_progress"]}},
+            {"status": {"$in": sorted(FIELD_INSPECTOR_VISIBLE_STATUSES)}},
         )
     return {}
 
@@ -129,7 +136,7 @@ def _can_access_ticket(doc: dict, current_user: dict) -> bool:
     if role == ROLE_WORKER:
         return _is_worker_assigned(doc, user_id)
     if role == ROLE_FIELD_INSPECTOR:
-        if not _is_field_inspector_ticket_eligible(doc):
+        if not _is_field_inspector_ticket_visible(doc):
             return False
         field_inspector_id = str(doc.get("fieldInspectorId") or "").strip()
         if not field_inspector_id:
@@ -159,11 +166,66 @@ def _is_ticket_reporter(doc: dict, current_user: dict) -> bool:
     return str((incident_doc or {}).get("reporterId") or "").strip() == user_id
 
 
+def _is_field_inspector_note_text(value: str | None) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return any(text.startswith(prefix) for prefix in FIELD_INSPECTOR_NOTE_PREFIXES)
+
+
+def _latest_inspector_note(notes: list[dict] | None, user_id: str | None = None) -> dict | None:
+    if not isinstance(notes, list):
+        return None
+    candidate_user_id = str(user_id or "").strip()
+    for row in range(len(notes) - 1, -1, -1):
+        note = notes[row]
+        if not isinstance(note, dict):
+            continue
+        if candidate_user_id and str(note.get("by") or "").strip() != candidate_user_id:
+            continue
+        if not _is_field_inspector_note_text(note.get("note")):
+            continue
+        return note
+    return None
+
+
+def _resolve_field_inspector_last_update_at(doc: dict, user_id: str | None = None) -> str | None:
+    if not isinstance(doc, dict):
+        return None
+
+    for key in ("lastInspectorUpdateAt", "lastFieldInspectorUpdateAt", "fieldInspectorLastUpdateAt"):
+        value = str(doc.get(key) or "").strip()
+        if value and _parse_iso_datetime(value):
+            return value
+
+    latest_note = _latest_inspector_note(doc.get("notes"), user_id)
+    if latest_note:
+        for key in ("editedAt", "createdAt"):
+            value = str(latest_note.get(key) or "").strip()
+            if value and _parse_iso_datetime(value):
+                return value
+
+    # Legacy fallback: if inspector ownership is clear, use progressUpdatedAt.
+    progress_updated_at = str(doc.get("progressUpdatedAt") or "").strip()
+    if progress_updated_at and _parse_iso_datetime(progress_updated_at):
+        current_user_id = str(user_id or "").strip()
+        field_inspector_id = str(doc.get("fieldInspectorId") or "").strip()
+        if not current_user_id or not field_inspector_id or field_inspector_id == current_user_id:
+            return progress_updated_at
+
+    return None
+
+
 def _can_access_ticket_logbook(doc: dict, current_user: dict) -> bool:
     if is_official_account(current_user):
         role = normalize_official_role(current_user.get("officialRole"))
         if role not in {ROLE_DEPARTMENT, ROLE_SUPERVISOR, ROLE_WORKER, ROLE_FIELD_INSPECTOR}:
             return False
+        if role == ROLE_DEPARTMENT:
+            return True
+        if role == ROLE_FIELD_INSPECTOR:
+            # Field inspectors can access logbooks for ALL tickets
+            return True
         return _can_access_ticket(doc, current_user)
     return _is_ticket_reporter(doc, current_user)
 
@@ -205,9 +267,14 @@ def _supervisor_can_handle_ticket(doc: dict, supervisor_user_id: str | None) -> 
     return assigned_supervisor_id == current_user_id
 
 
+def _is_field_inspector_ticket_visible(doc: dict) -> bool:
+    status = (doc.get("status") or "").strip().lower()
+    return status in FIELD_INSPECTOR_VISIBLE_STATUSES
+
+
 def _is_field_inspector_ticket_eligible(doc: dict) -> bool:
     status = (doc.get("status") or "").strip().lower()
-    return status in {"verified", "in_progress"}
+    return status in FIELD_INSPECTOR_EDITABLE_STATUSES
 
 
 def _resolve_ticket_reporter_email(doc: dict) -> str | None:
@@ -355,8 +422,7 @@ def _update_latest_inspector_note(
             continue
         if str(note.get("by") or "").strip() != user_id:
             continue
-        existing_text = (note.get("note") or "").strip().lower()
-        if not existing_text.startswith("field inspector update"):
+        if not _is_field_inspector_note_text(note.get("note")):
             continue
         next_note = dict(note)
         next_note["note"] = note_text
@@ -995,6 +1061,7 @@ def update_ticket_progress(
         raise HTTPException(status_code=400, detail="updateText must be at least 5 characters")
     edit_requested = bool(payload.editLastUpdate and role == ROLE_FIELD_INSPECTOR)
     current_user_id = str(current_user.get("id") or "").strip()
+    editable_reference = None
 
     if edit_requested:
         latest_inspector_id = str(existing.get("fieldInspectorId") or "").strip()
@@ -1003,7 +1070,13 @@ def update_ticket_progress(
                 status_code=403,
                 detail="Only the original field inspector can edit this update",
             )
-        if not _field_inspector_edit_window_active(existing.get("lastInspectorUpdateAt")):
+        if not latest_inspector_id and _latest_inspector_note(existing.get("notes"), current_user_id) is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the original field inspector can edit this update",
+            )
+        editable_reference = _resolve_field_inspector_last_update_at(existing, current_user_id)
+        if not _field_inspector_edit_window_active(editable_reference):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -1029,7 +1102,10 @@ def update_ticket_progress(
     if previous_status in {"open", "pending", "verified"}:
         set_payload["status"] = "in_progress"
     if role == ROLE_FIELD_INSPECTOR:
-        set_payload["lastInspectorUpdateAt"] = now
+        if edit_requested and editable_reference:
+            set_payload["lastInspectorUpdateAt"] = editable_reference
+        else:
+            set_payload["lastInspectorUpdateAt"] = now
         set_payload["fieldInspectorId"] = current_user.get("id")
         set_payload["fieldInspectorName"] = current_user.get("name") or current_user.get("email")
         set_payload["inspectorReminderSentForDate"] = ""
@@ -1048,9 +1124,8 @@ def update_ticket_progress(
             note_text,
             now,
         )
-        if not updated_notes:
-            edit_requested = False
-            note_text = f"{note_label}: {update_text} ({progress_percent}%)"
+        if updated_notes is None:
+            raise HTTPException(status_code=400, detail="No editable field inspector update found")
 
     obj_id = to_object_id(ticket_id)
     update_ops = {"$set": set_payload}
@@ -1097,7 +1172,9 @@ def update_ticket_progress(
 @router.get("/{ticket_id}/logbook")
 def get_ticket_logbook_entries(ticket_id: str, current_user: dict = Depends(get_current_user)):
     doc = _get_ticket_doc(ticket_id)
-    if not _can_access_ticket_logbook(doc, current_user):
+    # Any authenticated official account can read official ticket activity logs.
+    # Reporters (citizen accounts) are still limited to their own tickets.
+    if not is_official_account(current_user) and not _is_ticket_reporter(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     data = get_ticket_logbook(ticket_id)
     return {"success": True, "data": data}

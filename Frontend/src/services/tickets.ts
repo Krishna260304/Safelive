@@ -4,6 +4,7 @@ import { API_CONFIG, API_ENDPOINTS } from '@/config/api';
 export interface Ticket {
   id: string;
   ticketId?: string;
+  incidentId?: string;
   title: string;
   description?: string;
   category: string;

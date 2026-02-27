@@ -5,6 +5,7 @@ from datetime import datetime
 from app.database import incident_logs
 from app.roles import normalize_official_role
 from app.services.logbook_sentence_ai import generate_logbook_sentence
+from app.utils import to_object_id
 from app.utils import serialize_list
 
 
@@ -36,10 +37,20 @@ def append_incident_log(
 
 
 def get_ticket_logbook(ticket_id: str) -> list[dict]:
-    rows = list(incident_logs.find({"ticketId": ticket_id}).sort("createdAt", -1))
+    selectors = [{"ticketId": ticket_id}]
+    try:
+        selectors.append({"ticketId": to_object_id(ticket_id)})
+    except Exception:
+        pass
+    rows = list(incident_logs.find({"$or": selectors}).sort("createdAt", -1))
     return serialize_list(rows)
 
 
 def get_incident_logbook(incident_id: str) -> list[dict]:
-    rows = list(incident_logs.find({"incidentId": incident_id}).sort("createdAt", -1))
+    selectors = [{"incidentId": incident_id}]
+    try:
+        selectors.append({"incidentId": to_object_id(incident_id)})
+    except Exception:
+        pass
+    rows = list(incident_logs.find({"$or": selectors}).sort("createdAt", -1))
     return serialize_list(rows)
