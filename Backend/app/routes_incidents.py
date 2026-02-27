@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pymongo import ReturnDocument
-from app.database import counters, incidents, messages, tickets, users
+from app.database import counters, incident_logs, incidents, messages, tickets, users
 from app.models import IncidentCreate, IncidentUpdate, MessageCreate
 from app.services.ws_manager import manager
 from app.services.image_service import save_image
@@ -57,6 +57,7 @@ IOT_PRIORITY_BY_SEVERITY = {
     "medium": "medium",
     "high": "high",
 }
+OFFICIAL_ACTIVITY_ROLES = {"department", "supervisor", "field_inspector", "worker"}
 
 def _now_iso():
     return datetime.utcnow().isoformat()
@@ -186,7 +187,26 @@ def _ticket_status_for_incident(doc: dict) -> str:
     ticket_doc = tickets.find_one({"incidentId": incident_id}, {"status": 1})
     return (ticket_doc or {}).get("status", "").strip().lower()
 
+
+def _has_official_logbook_action(doc: dict) -> bool:
+    incident_object_id = doc.get("_id")
+    incident_id = str(incident_object_id) if incident_object_id is not None else ""
+    if not incident_id:
+        return False
+    row = incident_logs.find_one(
+        {
+            "incidentId": incident_id,
+            "actorOfficialRole": {"$in": sorted(OFFICIAL_ACTIVITY_ROLES)},
+        },
+        {"_id": 1},
+    )
+    return bool(row)
+
 def _reporter_edit_locked(doc: dict) -> bool:
+    if bool(doc.get("officialActionTaken")):
+        return True
+    if _has_official_logbook_action(doc):
+        return True
     incident_status = (doc.get("status") or "").strip().lower()
     if incident_status in {"verified", "in_progress", "resolved"}:
         return True
@@ -499,6 +519,8 @@ def get_incidents(current_user: dict = Depends(get_current_user)):
     if not _is_official(current_user):
         query["reporterId"] = current_user.get("id")
     data = list(incidents.find(query).sort("createdAt", -1))
+    for row in data:
+        row["officialActionTaken"] = _reporter_edit_locked(row)
     serialized = serialize_list(data)
     safe_data = [_sanitize_incident_payload(item) for item in serialized]
     return {"success": True, "data": safe_data}
@@ -531,6 +553,7 @@ def get_incident(incident_id: str, current_user: dict = Depends(get_current_user
     doc = _get_incident_doc(incident_id)
     if not _can_access_incident(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
+    doc["officialActionTaken"] = _reporter_edit_locked(doc)
     return {"success": True, "data": _sanitize_incident_payload(serialize_doc(doc))}
 
 
@@ -654,7 +677,8 @@ async def create_incident(
         "status": incident_status,
         "createdAt": now,
         "updatedAt": now,
-        "hasMessages": False
+        "hasMessages": False,
+        "officialActionTaken": False,
     })
     if current_user:
         data["reportedBy"] = current_user.get("name") or current_user.get("email") or current_user.get("phone")
@@ -998,6 +1022,7 @@ async def report_issue(
         "createdAt": now,
         "updatedAt": now,
         "hasMessages": False,
+        "officialActionTaken": False,
         "reportedBy": _sanitize_iot_text(issue.reportedBy, default=f"IoT Device {device_id}", max_len=120),
         "aiPriority": {
             "priority": priority_value,
@@ -1080,6 +1105,8 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
         updates["status"] = normalized_status
     if "priority" in updates:
         updates["priority"] = _normalize_priority_value(updates.get("priority"), default="medium")
+    if is_official_user:
+        updates["officialActionTaken"] = True
     images = updates.pop("images", None)
     if images is not None:
         image_urls = _save_images(images)

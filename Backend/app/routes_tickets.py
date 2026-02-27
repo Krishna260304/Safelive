@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -20,10 +20,33 @@ ROLE_SUPERVISOR = "supervisor"
 ROLE_FIELD_INSPECTOR = "field_inspector"
 ROLE_WORKER = "worker"
 TICKET_STATUSES = {"open", "pending", "in_progress", "verified", "resolved"}
+FIELD_INSPECTOR_EDIT_WINDOW_MINUTES = 10
 
 
 def _now_iso():
     return datetime.utcnow().isoformat()
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _field_inspector_edit_window_active(last_update_at: str | None, now: datetime | None = None) -> bool:
+    parsed = _parse_iso_datetime(last_update_at)
+    if not parsed:
+        return False
+    reference = now or datetime.utcnow()
+    return reference - parsed <= timedelta(minutes=FIELD_INSPECTOR_EDIT_WINDOW_MINUTES)
 
 
 def _current_official_role(current_user: dict) -> str:
@@ -293,7 +316,10 @@ def _sync_incident_from_ticket(doc: dict, updates: dict):
     selector = _incident_selector_from_ticket(doc)
     if not selector or not updates:
         return
-    incidents.update_one(selector, {"$set": updates})
+    next_updates = dict(updates)
+    # Any ticket-side mutation is an official workflow action for this incident.
+    next_updates["officialActionTaken"] = True
+    incidents.update_one(selector, {"$set": next_updates})
 
 
 def _record_ticket_log(action: str, ticket_doc: dict, actor: dict, details: dict | None = None):
@@ -632,7 +658,9 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["inspectorReminderSentForDate"] = ""
         # Clear current worker assignments - supervisor must reassign after reopening
         update["workerId"] = ""
+        update["workerCode"] = ""
         update["workerIds"] = []
+        update["workerCodes"] = []
         update["assignees"] = []
         update["assignedTo"] = ""
         update["assigneeName"] = ""
@@ -688,7 +716,9 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
                     "assigneeEmail": "",
                     "assigneeUserId": "",
                     "workerId": "",
+                    "workerCode": "",
                     "workerIds": [],
+                    "workerCodes": [],
                     "assignees": [],
                     "workerSpecialization": "",
                     "workerSpecializations": [],
@@ -964,6 +994,23 @@ def update_ticket_progress(
     if len(update_text) < 5:
         raise HTTPException(status_code=400, detail="updateText must be at least 5 characters")
     edit_requested = bool(payload.editLastUpdate and role == ROLE_FIELD_INSPECTOR)
+    current_user_id = str(current_user.get("id") or "").strip()
+
+    if edit_requested:
+        latest_inspector_id = str(existing.get("fieldInspectorId") or "").strip()
+        if latest_inspector_id and latest_inspector_id != current_user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the original field inspector can edit this update",
+            )
+        if not _field_inspector_edit_window_active(existing.get("lastInspectorUpdateAt")):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Field inspector updates can be edited only within "
+                    f"{FIELD_INSPECTOR_EDIT_WINDOW_MINUTES} minutes of submission"
+                ),
+            )
 
     prediction = predict_ticket_progress(update_text)
     now = _now_iso()
@@ -990,7 +1037,6 @@ def update_ticket_progress(
         set_payload["lastWorkerUpdateAt"] = now
 
     note_label = "Field Inspector update" if role == ROLE_FIELD_INSPECTOR else "Worker update"
-    current_user_id = str(current_user.get("id") or "").strip()
     note_text = f"{note_label}: {update_text} ({progress_percent}%)"
     updated_notes = None
     if edit_requested:

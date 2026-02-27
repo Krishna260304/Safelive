@@ -25,6 +25,7 @@ export interface Incident {
   scope?: string;
   source?: string;
   deviceId?: string;
+  officialActionTaken?: boolean;
   createdAt: string;
   updatedAt?: string;
   hasMessages?: boolean;

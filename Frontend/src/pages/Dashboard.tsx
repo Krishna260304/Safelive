@@ -77,6 +77,32 @@ const logbookDetailText = (details?: Record<string, unknown>) => {
     .join(' | ');
 };
 
+const sanitizeLogbookSummary = (value?: string): string => {
+  let text = (value || '').trim();
+  if (!text) return '';
+  text = text.replace(/\s+/g, ' ');
+
+  const detailsActorMatch = text.match(/^details:\s*(.+?)\s*actor:\s*(.+?)\.?$/i);
+  if (detailsActorMatch) {
+    const detailsPart = detailsActorMatch[1].trim().replace(/[. ]+$/g, '');
+    const actorPart = detailsActorMatch[2].trim().replace(/[. ]+$/g, '');
+    if (detailsPart && actorPart) {
+      return `${detailsPart} by ${actorPart}.`;
+    }
+  }
+
+  text = text.replace(/^details:\s*/i, '').trim();
+  text = text.replace(/\s*actor:\s*([^.;]+)/gi, (_match, actorPart: string) => ` by ${actorPart.trim()}`).trim();
+  text = text.replace(/\bis an actor\b/gi, '').trim();
+  if (/\bactor\b/i.test(text)) {
+    return '';
+  }
+  if (text && !/[.!?]$/.test(text)) {
+    text = `${text}.`;
+  }
+  return text;
+};
+
 const formatLogbookDate = (value?: string): string => {
   if (!value) return 'N/A';
   const parsed = new Date(value);
@@ -206,6 +232,11 @@ const Dashboard = () => {
 
   const canEditIncident = useCallback((incident: Incident) => {
     if (!isLocalUser) return false;
+    const hasOfficialAction =
+      Boolean(incident.officialActionTaken) || Boolean((incident.assignedTo || '').trim());
+    if (hasOfficialAction) {
+      return false;
+    }
     const status = (incident.status || '').toLowerCase();
     if (status === 'verified' || status === 'in_progress' || status === 'resolved') {
       return false;
@@ -312,7 +343,7 @@ const Dashboard = () => {
       actorRole: entry.actorOfficialRole || '',
       date: formatLogbookDate(entry.createdAt),
       time: formatLogbookTime(entry.createdAt),
-      details: (entry.summary || '').trim() || logbookDetailText(entry.details),
+      details: sanitizeLogbookSummary(entry.summary) || logbookDetailText(entry.details),
     }));
   }, [logbookEntries]);
 
@@ -393,21 +424,20 @@ const Dashboard = () => {
 
     // Prepare data for Excel
     const worksheetData: (string)[][] = [
-      ['Action', 'Details', 'Actor', 'Date', 'Time'],
-      ...logbookRows.map((row) => [row.action, row.details, `${row.actor}${row.actorRole ? ` (${row.actorRole})` : ''}`, row.date, row.time]),
+      ['Action', 'Details', 'Date', 'Time'],
+      ...logbookRows.map((row) => [
+        row.action,
+        `${row.details}\n${row.actor}${row.actorRole ? ` (${row.actorRole})` : ''}`,
+        row.date,
+        row.time,
+      ]),
     ];
 
     // Create worksheet
     const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
 
     // Set column widths
-    worksheet['!cols'] = [
-      { wch: 20 },
-      { wch: 40 },
-      { wch: 25 },
-      { wch: 15 },
-      { wch: 10 },
-    ];
+    worksheet['!cols'] = [{ wch: 28 }, { wch: 58 }, { wch: 14 }, { wch: 10 }];
 
     // Create workbook
     const workbook = XLSX.utils.book_new();
@@ -819,7 +849,7 @@ const Dashboard = () => {
         </DialogContent>
       </Dialog>
       <Dialog open={logbookDialogOpen} onOpenChange={setLogbookDialogOpen}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-4xl">
           <DialogHeader>
             <DialogTitle>Incident LogBook</DialogTitle>
             <DialogDescription>
@@ -871,25 +901,58 @@ const Dashboard = () => {
               )}
             </div>
           </div>
-          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
-            {logbookLoading && <div className="text-sm text-muted-foreground">Loading logbook...</div>}
-            {!logbookLoading && logbookError && (
-              <div className="text-sm text-destructive">{logbookError}</div>
-            )}
-            {!logbookLoading && !logbookError && logbookEntries.length === 0 && (
-              <div className="text-sm text-muted-foreground">No logbook entries available yet.</div>
-            )}
-            {!logbookLoading && !logbookError && logbookEntries.map((entry) => (
-              <div key={entry.id} className="rounded-md border border-border p-3">
-                <div className="text-sm font-medium text-foreground">{formatActionLabel(entry.action)}</div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  By {entry.actorName || 'System'} {entry.actorOfficialRole ? `(${entry.actorOfficialRole})` : ''} on {new Date(entry.createdAt).toLocaleString()}
-                </div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {(entry.summary || '').trim() || logbookDetailText(entry.details)}
-                </div>
-              </div>
-            ))}
+          <div className="rounded-md border border-border overflow-hidden">
+            <div className="max-h-[60vh] overflow-auto">
+              <table className="w-full border-collapse text-sm">
+                <thead className="sticky top-0 z-10 bg-muted">
+                  <tr>
+                    <th className="border border-border px-3 py-2 text-left text-xs font-semibold">Action</th>
+                    <th className="border border-border px-3 py-2 text-left text-xs font-semibold">Details</th>
+                    <th className="border border-border px-3 py-2 text-left text-xs font-semibold">Date</th>
+                    <th className="border border-border px-3 py-2 text-left text-xs font-semibold">Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logbookLoading && (
+                    <tr>
+                      <td colSpan={4} className="border border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                        Loading logbook...
+                      </td>
+                    </tr>
+                  )}
+                  {!logbookLoading && logbookError && (
+                    <tr>
+                      <td colSpan={4} className="border border-border px-3 py-6 text-center text-sm text-destructive">
+                        {logbookError}
+                      </td>
+                    </tr>
+                  )}
+                  {!logbookLoading && !logbookError && logbookRows.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="border border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                        No logbook entries available yet.
+                      </td>
+                    </tr>
+                  )}
+                  {!logbookLoading &&
+                    !logbookError &&
+                    logbookRows.map((row, index) => (
+                      <tr key={row.id} className={index % 2 === 0 ? 'bg-background' : 'bg-muted/20'}>
+                        <td className="border border-border px-3 py-2 align-top">{row.action}</td>
+                        <td className="border border-border px-3 py-2 align-top">
+                          <div className="text-foreground">{row.details}</div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {row.actor}
+                            {row.actorRole ? ` (${row.actorRole})` : ''}
+                          </div>
+                        </td>
+                        <td className="border border-border px-3 py-2 align-top">{row.date}</td>
+                        <td className="border border-border px-3 py-2 align-top">{row.time}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

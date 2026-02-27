@@ -291,8 +291,57 @@ class TextPriorityModel:
             model_id = (settings.PRIORITY_AI_TEXT_MODEL or DEFAULT_TEXT_MODEL_ID).strip() or DEFAULT_TEXT_MODEL_ID
             try:
                 from transformers import pipeline
-                self._pipeline = pipeline("zero-shot-classification", model=model_id, device=_resolve_hf_device())
-                LOGGER.info("Loaded priority text model: %s", model_id)
+                
+                device_id = _resolve_hf_device()
+                # If CUDA is available, prioritize GPU attempts
+                if device_id >= 0:
+                    load_attempts = [
+                        {"device": device_id},
+                        {"device": device_id, "model_kwargs": {"low_cpu_mem_usage": False}},
+                        {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+                        {},
+                    ]
+                else:
+                    # CPU only attempts
+                    load_attempts = [
+                        {"device": -1},
+                        {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+                        {},
+                    ]
+                
+                last_error = None
+                loaded_on_gpu = False
+                
+                for load_kwargs in load_attempts:
+                    current_device = load_kwargs.get("device", device_id)
+                    
+                    # If we already loaded on GPU, don't try CPU
+                    if loaded_on_gpu and current_device < 0:
+                        continue
+                    
+                    try:
+                        self._pipeline = pipeline(
+                            "zero-shot-classification", 
+                            model=model_id, 
+                            trust_remote_code=True,
+                            **load_kwargs
+                        )
+                        LOGGER.info("Loaded priority text model: %s (device=%s)", model_id, "cuda" if current_device >= 0 else "cpu")
+                        if current_device >= 0:
+                            loaded_on_gpu = True
+                        return
+                    except Exception as exc:
+                        last_error = exc
+                        exc_str = str(exc).lower()
+                        if "meta tensor" in exc_str or "cannot be called on meta tensors" in exc_str:
+                            LOGGER.debug("Meta-tensor load issue with args %s: %s", load_kwargs, exc)
+                            continue
+                        continue
+                
+                self._pipeline = None
+                if last_error:
+                    raise last_error
+                
             except Exception as exc:
                 self._pipeline = None
                 LOGGER.warning("Priority text model unavailable: %s", exc)

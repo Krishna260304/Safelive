@@ -107,6 +107,27 @@ const formatStatus = (value?: string) => {
   return text.toUpperCase();
 };
 
+const FIELD_INSPECTOR_EDIT_WINDOW_MS = 10 * 60 * 1000;
+
+const parseIsoMillis = (value?: string): number | null => {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.getTime();
+};
+
+const getFieldInspectorEditWindowMsLeft = (ticket: Ticket, currentUserId: string): number => {
+  const inspectorId = (ticket.fieldInspectorId || '').trim();
+  if (!currentUserId) return -1;
+  if (inspectorId && inspectorId !== currentUserId) return -1;
+  const lastUpdateMs = parseIsoMillis(ticket.lastInspectorUpdateAt);
+  if (lastUpdateMs === null) return -1;
+  return lastUpdateMs + FIELD_INSPECTOR_EDIT_WINDOW_MS - Date.now();
+};
+
+const isFieldInspectorEditWindowActive = (ticket: Ticket, currentUserId: string): boolean =>
+  getFieldInspectorEditWindowMsLeft(ticket, currentUserId) >= 0;
+
 const logbookDetailText = (details: Record<string, unknown> | undefined): string => {
   if (!details || Object.keys(details).length === 0) return 'No extra details';
   const isHiddenDetailKey = (key: string) => {
@@ -139,10 +160,60 @@ const logbookDetailText = (details: Record<string, unknown> | undefined): string
 
 const asCleanText = (value: unknown): string => String(value || '').trim();
 
+const sanitizeLogbookSummary = (value: string): string => {
+  let text = (value || '').trim();
+  if (!text) return '';
+  text = text.replace(/\s+/g, ' ');
+
+  const detailsActorMatch = text.match(/^details:\s*(.+?)\s*actor:\s*(.+?)\.?$/i);
+  if (detailsActorMatch) {
+    const detailsPart = detailsActorMatch[1].trim().replace(/[. ]+$/g, '');
+    const actorPart = detailsActorMatch[2].trim().replace(/[. ]+$/g, '');
+    if (detailsPart && actorPart) {
+      return `${detailsPart} by ${actorPart}.`;
+    }
+  }
+
+  text = text.replace(/^details:\s*/i, '').trim();
+  text = text.replace(/\s*actor:\s*([^.;]+)/gi, (_match, actorPart: string) => ` by ${actorPart.trim()}`).trim();
+  text = text.replace(/\bis an actor\b/gi, '').trim();
+  if (/\bactor\b/i.test(text)) {
+    return '';
+  }
+  if (text && !/[.!?]$/.test(text)) {
+    text = `${text}.`;
+  }
+  return text;
+};
+
+const toProgressPercentText = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  const numeric = Number(value);
+  if (!Number.isNaN(numeric)) return `${Math.round(numeric)}%`;
+  const text = String(value).trim();
+  if (!text) return '';
+  return text.endsWith('%') ? text : `${text}%`;
+};
+
 const formatLogbookDetails = (entry: TicketLogEntry): string => {
   const action = (entry.action || '').trim().toLowerCase();
   const details = entry.details || {};
-  const summary = (entry.summary || '').trim();
+  if (action === 'field_inspector_progress_update' || action === 'field_inspector_progress_update_edited') {
+    const updateText = asCleanText(details.updateText);
+    const progressPercentText = toProgressPercentText(details.progressPercent);
+    const prefix = action === 'field_inspector_progress_update_edited' ? 'Field inspector edited update' : 'Field inspector update';
+    if (updateText && progressPercentText) {
+      return `${prefix}: ${updateText} (${progressPercentText} progress)`;
+    }
+    if (updateText) {
+      return `${prefix}: ${updateText}`;
+    }
+    if (progressPercentText) {
+      return `${prefix}: ${progressPercentText} progress`;
+    }
+    return prefix;
+  }
+  const summary = sanitizeLogbookSummary((entry.summary || '').trim());
   if (summary) {
     return summary;
   }
@@ -205,7 +276,11 @@ const ticketWorkerNames = (ticket: Ticket): string[] => {
       .map((row) => workerLabel(row?.name, row?.workerCode))
       .filter((value) => value.length > 0);
   }
-  if (ticket.assigneeName || ticket.workerCode) {
+  const hasPrimaryAssignmentIdentity =
+    Boolean((ticket.assigneeName || '').trim()) ||
+    Boolean((ticket.assigneeUserId || '').trim()) ||
+    Boolean((ticket.workerId || '').trim());
+  if (hasPrimaryAssignmentIdentity) {
     const label = workerLabel(ticket.assigneeName, ticket.workerCode);
     if (label) return [label];
   }
@@ -239,6 +314,7 @@ const OfficialDashboard = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
   const user = authService.getCurrentUser();
+  const currentUserId = (user?.id || '').trim();
   const role = toRole(user?.officialRole);
   const isTicketsPage = pathname.startsWith('/official/tickets');
   const isReadOnlyDashboard = pathname.startsWith('/official/dashboard');
@@ -641,9 +717,17 @@ const OfficialDashboard = () => {
   };
 
   const handleStartEditProgress = useCallback((ticket: Ticket) => {
+    if (!isFieldInspectorEditWindowActive(ticket, currentUserId)) {
+      toast({
+        title: 'Edit Window Closed',
+        description: 'Field inspector updates can be edited only within 10 minutes of submission.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setProgressDrafts((prev) => ({ ...prev, [ticket.id]: ticket.progressSummary || '' }));
     setEditingProgressByTicket((prev) => ({ ...prev, [ticket.id]: true }));
-  }, []);
+  }, [currentUserId, toast]);
 
   const handleCancelEditProgress = useCallback((ticketId: string) => {
     setEditingProgressByTicket((prev) => {
@@ -669,6 +753,17 @@ const OfficialDashboard = () => {
       return;
     }
     const isEditing = Boolean(editingProgressByTicket[ticketId]);
+    const ticket = tickets.find((row) => row.id === ticketId);
+    if (role === 'field_inspector' && isEditing) {
+      if (!ticket || !isFieldInspectorEditWindowActive(ticket, currentUserId)) {
+        toast({
+          title: 'Edit Window Closed',
+          description: 'Field inspector updates can be edited only within 10 minutes of submission.',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
 
     setProgressSubmittingId(ticketId);
     try {
@@ -842,11 +937,15 @@ const OfficialDashboard = () => {
               const reopenedSupervisorId = (ticket.reopenedSupervisorId || '').trim();
               const reopenedSupervisorName = (ticket.reopenedSupervisorName || '').trim();
               const hasReopenedSupervisor = reopenedSupervisorId.length > 0;
-              const currentUserId = (user?.id || '').trim();
               const supervisorAssignedToCurrentUser = !isReopenedCase || !reopenedSupervisorId || reopenedSupervisorId === currentUserId;
               const isReopenedAwaitingSupervisorAssignment = role === 'department' && isReopenedCase && !hasReopenedSupervisor;
               const isResolved = ticket.status === 'resolved';
               const isVerified = ticket.status === 'verified';
+              const inspectorEditWindowMsLeft =
+                role === 'field_inspector' ? getFieldInspectorEditWindowMsLeft(ticket, currentUserId) : -1;
+              const inspectorEditWindowActive = inspectorEditWindowMsLeft >= 0;
+              const inspectorEditMinutesLeft =
+                inspectorEditWindowActive ? Math.max(1, Math.ceil(inspectorEditWindowMsLeft / 60000)) : 0;
               const canVerifyStep = !isResolved && !isVerified;
               const canAssignWorkersStep = !isResolved && isVerified && !hasAssignedWorker;
               const canResolveStep = !isResolved && isVerified && hasAssignedWorker;
@@ -1096,17 +1195,26 @@ const OfficialDashboard = () => {
                                   </Button>
                                 </>
                               ) : (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 px-2 text-primary"
-                                  onClick={() => handleStartEditProgress(ticket)}
-                                  disabled={progressSubmittingId === ticket.id}
-                                >
-                                  <Pencil className="h-3.5 w-3.5 mr-1" />
-                                  Edit last update
-                                </Button>
+                                <>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-primary"
+                                    onClick={() => handleStartEditProgress(ticket)}
+                                    disabled={progressSubmittingId === ticket.id || !inspectorEditWindowActive}
+                                  >
+                                    <Pencil className="h-3.5 w-3.5 mr-1" />
+                                    Edit last update
+                                  </Button>
+                                  {inspectorEditWindowActive ? (
+                                    <span className="text-primary font-medium">
+                                      Edit available for ~{inspectorEditMinutesLeft} min
+                                    </span>
+                                  ) : (
+                                    <span>Edit window closed (10-minute limit).</span>
+                                  )}
+                                </>
                               )}
                             </div>
                           )}
@@ -1142,7 +1250,7 @@ const OfficialDashboard = () => {
       </OfficialDashboardLayout>
 
       <Dialog open={logbookDialogOpen} onOpenChange={setLogbookDialogOpen}>
-        <DialogContent className="sm:max-w-5xl">
+        <DialogContent className="sm:max-w-5xl border-[#c5cdd7] bg-[#edf1f5]">
           <DialogHeader>
             <DialogTitle>Ticket LogBook</DialogTitle>
             <DialogDescription>
@@ -1150,13 +1258,14 @@ const OfficialDashboard = () => {
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center justify-between gap-2 relative">
-            <div className="text-xs text-muted-foreground">
+            <div className="text-xs text-[#66788d]">
               Total updates: {logbookRows.length}
             </div>
             <div className="relative">
               <Button 
                 variant="outline" 
                 size="sm" 
+                className="border-[#c5cdd7] bg-[#eef2f6] text-[#2f3b49] hover:bg-[#e6ebf1]"
                 disabled={logbookLoading || logbookRows.length === 0}
                 onClick={() => setLogbookDownloadMenuOpen(!logbookDownloadMenuOpen)}
               >
@@ -1170,9 +1279,9 @@ const OfficialDashboard = () => {
                     className="fixed inset-0 z-40"
                     onClick={() => setLogbookDownloadMenuOpen(false)}
                   />
-                  <div className="absolute right-0 top-full mt-1 w-40 bg-background border border-border rounded-md shadow-lg z-50">
+                  <div className="absolute right-0 top-full mt-1 w-40 bg-[#f1f4f8] border border-[#c5cdd7] rounded-md shadow-lg z-50">
                     <button
-                      className="w-full text-left px-4 py-2 hover:bg-accent hover:text-accent-foreground transition-colors text-sm"
+                      className="w-full text-left px-4 py-2 hover:bg-[#e6ebf1] transition-colors text-sm text-[#2f3b49]"
                       onClick={() => {
                         setLogbookDownloadMenuOpen(false);
                         handleDownloadLogbookPdf();
@@ -1181,7 +1290,7 @@ const OfficialDashboard = () => {
                       Download PDF
                     </button>
                     <button
-                      className="w-full text-left px-4 py-2 hover:bg-accent hover:text-accent-foreground transition-colors text-sm border-t border-border"
+                      className="w-full text-left px-4 py-2 hover:bg-[#e6ebf1] transition-colors text-sm border-t border-[#c5cdd7] text-[#2f3b49]"
                       onClick={() => {
                         setLogbookDownloadMenuOpen(false);
                         handleDownloadLogbookExcel();
@@ -1195,44 +1304,50 @@ const OfficialDashboard = () => {
             </div>
           </div>
 
-          <div className="rounded-md border border-[#2f6f98]/25 overflow-hidden bg-[#2f6f98]/8">
-            <div className="bg-[#2f6f98] px-3 py-2 text-center text-xs font-semibold tracking-wide text-white uppercase">
+          <div className="rounded-xl border border-[#bec8d3] overflow-hidden bg-[#e9edf2] shadow-sm">
+            <div className="bg-[linear-gradient(90deg,#204a7c_0%,#3b98a4_100%)] px-3 py-2 text-center text-xs font-semibold tracking-wide text-white uppercase">
               Status
             </div>
-            <div className="max-h-[420px] overflow-auto bg-[#2f6f98]/8">
-              <table className="w-full border-collapse text-sm bg-[#2f6f98]/8">
-                <thead className="sticky top-0 z-10 bg-[#2f6f98]/18">
-                  <tr className="text-[#1f4f6e]">
-                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Location</th>
-                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Details</th>
-                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Date</th>
-                    <th className="border border-[#2f6f98]/25 px-3 py-2 text-left text-xs font-semibold">Time</th>
+            <div className="max-h-[420px] overflow-auto bg-[#e9edf2]">
+              <table className="w-full border-collapse text-sm text-[#2f3b49] bg-[#e9edf2]">
+                <colgroup>
+                  <col className="w-[22%]" />
+                  <col className="w-[61%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[7%]" />
+                </colgroup>
+                <thead className="sticky top-0 z-10 bg-[#dce3ea]">
+                  <tr className="text-[#2f3b49]">
+                    <th className="border border-[#c2cbd6] px-3 py-2 text-left text-[13px] font-semibold">Location</th>
+                    <th className="border border-[#c2cbd6] px-3 py-2 text-left text-[13px] font-semibold">Details</th>
+                    <th className="border border-[#c2cbd6] px-3 py-2 text-left text-[13px] font-semibold">Date</th>
+                    <th className="border border-[#c2cbd6] px-3 py-2 text-left text-[13px] font-semibold">Time</th>
                   </tr>
                 </thead>
                 <tbody>
                   {logbookLoading && (
                     <tr>
-                      <td colSpan={4} className="border border-[#2f6f98]/25 px-3 py-6 text-center text-sm text-[#2f6f98]/80">
+                      <td colSpan={4} className="border border-[#c2cbd6] px-3 py-6 text-center text-sm text-[#4f6174]">
                         Loading logbook...
                       </td>
                     </tr>
                   )}
                   {!logbookLoading && logbookRows.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="border border-[#2f6f98]/25 px-3 py-6 text-center text-sm text-[#2f6f98]/80">
+                      <td colSpan={4} className="border border-[#c2cbd6] px-3 py-6 text-center text-sm text-[#4f6174]">
                         No log entries found.
                       </td>
                     </tr>
                   )}
                   {!logbookLoading && logbookRows.map((row, index) => (
-                    <tr key={row.id} className={index % 2 === 0 ? 'bg-[#2f6f98]/10' : 'bg-[#2f6f98]/5'}>
-                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">{row.location}</td>
-                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">
-                        <div className="text-foreground">{row.details}</div>
-                        <div className="mt-1 text-[11px] text-[#2f6f98]/80">{row.actor}</div>
+                    <tr key={row.id} className={index % 2 === 0 ? 'bg-[#eef2f6]' : 'bg-[#e8edf2]'}>
+                      <td className="border border-[#c2cbd6] px-3 py-2 align-top text-[13px]">{row.location}</td>
+                      <td className="border border-[#c2cbd6] px-3 py-2 align-top">
+                        <div className="text-[#2f3b49]">{row.details}</div>
+                        <div className="mt-1 text-[13px] text-[#66788d]">{row.actor}</div>
                       </td>
-                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">{row.date}</td>
-                      <td className="border border-[#2f6f98]/25 px-3 py-2 align-top">{row.time}</td>
+                      <td className="border border-[#c2cbd6] px-3 py-2 align-top whitespace-nowrap">{row.date}</td>
+                      <td className="border border-[#c2cbd6] px-3 py-2 align-top whitespace-nowrap">{row.time}</td>
                     </tr>
                   ))}
                 </tbody>

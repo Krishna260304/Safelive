@@ -171,7 +171,7 @@ def create_and_send_otp(user_doc: dict, purpose: str) -> OtpChallengeInfo:
     )
 
     if not channels_sent:
-        raise OtpError("Unable to deliver OTP to email or phone. Check email/Twilio configuration.")
+        raise OtpError("Unable to deliver OTP to email or phone. Check email/SMS configuration.")
 
     return OtpChallengeInfo(
         challenge_id=str(insert_result.inserted_id),

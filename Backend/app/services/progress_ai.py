@@ -42,13 +42,23 @@ def _resolve_hf_pipeline_device() -> tuple[int, str]:
 
 
 def _progress_pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
-    candidates = [
-        {"device": device_id},
-        {"device": -1},
-        {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
-        {"model_kwargs": {"low_cpu_mem_usage": False}},
-        {},
-    ]
+    # If CUDA is available, prioritize GPU attempts
+    if device_id >= 0:
+        candidates = [
+            {"device": device_id},
+            {"device": device_id, "model_kwargs": {"low_cpu_mem_usage": False}},
+            {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+            {"model_kwargs": {"low_cpu_mem_usage": False}},
+            {},
+        ]
+    else:
+        # CPU only attempts
+        candidates = [
+            {"device": -1},
+            {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+            {"model_kwargs": {"low_cpu_mem_usage": False}},
+            {},
+        ]
     attempts: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in candidates:
@@ -156,25 +166,36 @@ class _ProgressModel:
                         model_candidates.append(name)
 
                 last_error: Exception | None = None
+                loaded_on_gpu = False
+                
                 for model_name in model_candidates:
                     for load_kwargs in _progress_pipeline_load_attempts(device_id):
+                        current_device = load_kwargs.get("device", device_id)
+                        
+                        # If we already loaded on GPU, don't try CPU
+                        if loaded_on_gpu and current_device < 0:
+                            continue
+                        
                         try:
                             self._pipeline = pipeline(
                                 "zero-shot-classification",
                                 model=model_name,
+                                trust_remote_code=True,
                                 **load_kwargs,
                             )
-                            loaded_device = load_kwargs.get("device", device_id)
-                            loaded_device_name = device_name if loaded_device == device_id else "cpu"
+                            loaded_device_name = device_name if current_device == device_id else "cpu"
                             LOGGER.info(
                                 "Ticket progress AI model loaded: %s (device=%s)",
                                 model_name,
                                 loaded_device_name,
                             )
+                            if current_device >= 0:
+                                loaded_on_gpu = True
                             return
                         except Exception as exc:
                             last_error = exc
-                            if "meta tensor" in str(exc).lower():
+                            exc_str = str(exc).lower()
+                            if "meta tensor" in exc_str or "cannot be called on meta tensors" in exc_str:
                                 LOGGER.debug(
                                     "Meta-tensor load issue for progress model %s with args %s: %s",
                                     model_name,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from typing import Any
 
@@ -42,6 +43,51 @@ def _details_text(details: dict | None) -> str:
     return " | ".join(items)
 
 
+def _worker_names_text(details: dict | None) -> str:
+    raw_worker_names = (details or {}).get("workerNames")
+    names: list[str] = []
+    if isinstance(raw_worker_names, list):
+        for item in raw_worker_names:
+            value = str(item or "").strip()
+            if value:
+                names.append(value)
+    elif raw_worker_names is not None:
+        value = str(raw_worker_names).strip()
+        if value:
+            names.append(value)
+
+    if not names:
+        return ""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped.append(name)
+
+    if len(deduped) == 1:
+        return deduped[0]
+    if len(deduped) == 2:
+        return f"{deduped[0]} and {deduped[1]}"
+    return f"{', '.join(deduped[:-1])}, and {deduped[-1]}"
+
+
+def _progress_percent_text(details: dict | None) -> str:
+    value = (details or {}).get("progressPercent")
+    try:
+        if value is None:
+            return ""
+        return str(int(round(float(value))))
+    except Exception:
+        text = str(value or "").strip()
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        return text
+
+
 def _actor_label(actor: dict | None) -> str:
     if not actor:
         return ""
@@ -60,6 +106,27 @@ def _fallback_sentence(action: str | None, details: dict | None, actor: dict | N
     action_text = _action_label(action)
     from_status = str((details or {}).get("fromStatus") or "").strip()
     to_status = str((details or {}).get("toStatus") or "").strip()
+    if action_key == "worker_assigned_by_supervisor":
+        actor_text = _actor_label(actor) or "Supervisor"
+        worker_names = _worker_names_text(details)
+        if worker_names:
+            return f"{actor_text} approved the ticket and assigned {worker_names}."
+        return f"{actor_text} approved the ticket and assigned a worker."
+    if action_key in {"field_inspector_progress_update", "field_inspector_progress_update_edited"}:
+        actor_text = _actor_label(actor) or "Field Inspector"
+        update_text = str((details or {}).get("updateText") or "").strip()
+        progress_text = _progress_percent_text(details)
+        if action_key.endswith("_edited"):
+            if update_text and progress_text:
+                return f"{actor_text} edited field inspection update: {update_text} ({progress_text}% progress)."
+            if update_text:
+                return f"{actor_text} edited field inspection update: {update_text}."
+            return f"{actor_text} edited the field inspection update."
+        if update_text and progress_text:
+            return f"{actor_text} submitted field inspection update: {update_text} ({progress_text}% progress)."
+        if update_text:
+            return f"{actor_text} submitted field inspection update: {update_text}."
+        return f"{actor_text} submitted a field inspection update."
     actor_role = str((actor or {}).get("officialRole") or "").strip().lower()
     role_label = actor_role.replace("_", " ").title() if actor_role else ""
     if "resolved" in action_key and role_label:
@@ -78,6 +145,35 @@ def _fallback_sentence(action: str | None, details: dict | None, actor: dict | N
     return f"{action_text}."
 
 
+def _sanitize_generated_sentence(text: str, actor: dict | None) -> str | None:
+    cleaned = " ".join(str(text or "").strip().split())
+    if not cleaned:
+        return None
+
+    details_actor_match = re.match(r"(?is)^details:\s*(.+?)\s*actor:\s*(.+?)\.?$", cleaned)
+    if details_actor_match:
+        details_part = details_actor_match.group(1).strip().rstrip(".")
+        actor_part = details_actor_match.group(2).strip().rstrip(".")
+        if details_part and actor_part:
+            cleaned = f"{details_part} by {actor_part}."
+
+    cleaned = re.sub(r"(?is)^details:\s*", "", cleaned).strip()
+    cleaned = re.sub(r"(?is)\s*actor:\s*([^.;]+)", lambda m: f" by {m.group(1).strip()}", cleaned).strip()
+    cleaned = re.sub(r"(?is)\bis an actor\b", "", cleaned).strip()
+
+    # Never keep model outputs that still contain the word "actor".
+    if re.search(r"(?is)\bactor\b", cleaned):
+        return None
+
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
+    if cleaned and cleaned[-1] not in {".", "!", "?"}:
+        cleaned = f"{cleaned}."
+    if not cleaned:
+        return None
+    return cleaned
+
+
 def _resolve_hf_pipeline_device() -> int:
     try:
         import torch  # type: ignore
@@ -90,13 +186,23 @@ def _resolve_hf_pipeline_device() -> int:
 
 
 def _pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
-    candidates = [
-        {"device": device_id},
-        {"device": -1},
-        {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
-        {"model_kwargs": {"low_cpu_mem_usage": False}},
-        {},
-    ]
+    # If CUDA is available, prioritize GPU attempts
+    if device_id >= 0:
+        candidates = [
+            {"device": device_id},
+            {"device": device_id, "model_kwargs": {"low_cpu_mem_usage": False}},
+            {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+            {"model_kwargs": {"low_cpu_mem_usage": False}},
+            {},
+        ]
+    else:
+        # CPU only attempts
+        candidates = [
+            {"device": -1},
+            {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
+            {"model_kwargs": {"low_cpu_mem_usage": False}},
+            {},
+        ]
     attempts: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in candidates:
@@ -145,18 +251,37 @@ class _LogbookSentenceModel:
                         model_candidates.append(name)
 
                 last_error: Exception | None = None
+                loaded_on_gpu = False
+                
                 for model_name in model_candidates:
                     for load_kwargs in _pipeline_load_attempts(device_id):
+                        current_device = load_kwargs.get("device", device_id)
+                        
+                        # If we already loaded on GPU, don't try CPU
+                        if loaded_on_gpu and current_device < 0:
+                            continue
+                        
                         try:
                             self._pipeline = pipeline(
                                 "text2text-generation",
                                 model=model_name,
+                                trust_remote_code=True,
                                 **load_kwargs,
                             )
-                            LOGGER.info("Logbook sentence model loaded: %s", model_name)
+                            LOGGER.info("Logbook sentence model loaded: %s (device=%s)", model_name, "cuda" if current_device >= 0 else "cpu")
+                            if current_device >= 0:
+                                loaded_on_gpu = True
                             return
                         except Exception as exc:
                             last_error = exc
+                            exc_str = str(exc).lower()
+                            if "meta tensor" in exc_str or "cannot be called on meta tensors" in exc_str:
+                                LOGGER.debug(
+                                    "Meta-tensor load issue for logbook model %s with args %s: %s",
+                                    model_name,
+                                    load_kwargs,
+                                    exc,
+                                )
                             continue
                 self._pipeline = None
                 if last_error:
@@ -184,7 +309,7 @@ class _LogbookSentenceModel:
         if details_text:
             prompt_parts.append(f"Details: {details_text}.")
         if actor_text:
-            prompt_parts.append(f"Actor: {actor_text}.")
+            prompt_parts.append(f"Performed by {actor_text}.")
         prompt = " ".join(prompt_parts)
         try:
             result = self._pipeline(prompt, max_new_tokens=40, do_sample=False)
@@ -199,15 +324,20 @@ class _LogbookSentenceModel:
             text = str(result).strip()
         if not text:
             return None
-        if text[-1] not in {".", "!", "?"}:
-            text = f"{text}."
-        return text
+        return _sanitize_generated_sentence(text, actor)
 
 
 _sentence_model = _LogbookSentenceModel()
 
 
 def generate_logbook_sentence(action: str | None, details: dict | None, actor: dict | None) -> str:
+    action_key = (action or "").strip().lower()
+    if action_key in {
+        "worker_assigned_by_supervisor",
+        "field_inspector_progress_update",
+        "field_inspector_progress_update_edited",
+    }:
+        return _fallback_sentence(action, details, actor)
     sentence = _sentence_model.generate(action, details, actor)
     if sentence:
         return sentence
