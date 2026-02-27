@@ -6,6 +6,7 @@ from app.auth import get_current_user, hash_password, require_official_roles
 from app.config.settings import settings
 from app.database import users
 from app.models import DepartmentOfficialCreate, UserUpdate
+from app.services.pincode_service import is_valid_pincode, normalize_pincode
 from app.roles import normalize_official_role
 from app.utils import serialize_doc, to_object_id
 from pymongo.errors import DuplicateKeyError
@@ -36,6 +37,19 @@ def _ensure_worker_code(worker_doc: dict) -> str:
     )
     return generated
 
+
+def _validate_optional_pincode(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = normalize_pincode(text)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="pincode must be a valid 6-digit number")
+    if not is_valid_pincode(normalized):
+        raise HTTPException(status_code=400, detail="pincode not found")
+    return normalized
+
 @router.get("/profile")
 def get_profile(current_user: dict = Depends(get_current_user)):
     return {"success": True, "data": current_user}
@@ -48,6 +62,8 @@ def update_profile(payload: UserUpdate, current_user: dict = Depends(get_current
     updates = payload.dict(exclude_unset=True, exclude_none=True)
     if not updates:
         return {"success": True, "data": current_user}
+    if "pincode" in updates:
+        updates["pincode"] = _validate_optional_pincode(updates.get("pincode"))
     updates["updatedAt"] = datetime.utcnow().isoformat()
     obj_id = to_object_id(user_id)
     try:
@@ -169,7 +185,7 @@ def create_managed_official(
         "officialRole": normalized_role,
         "workerSpecialization": None,
         "address": payload.address,
-        "pincode": payload.pincode,
+        "pincode": _validate_optional_pincode(payload.pincode),
         "department": department_name,
         "createdByDepartmentId": str(current_user.get("id") or "").strip() or None,
         "createdByDepartmentName": current_user.get("name") or current_user.get("email"),

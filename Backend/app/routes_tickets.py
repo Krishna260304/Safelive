@@ -9,7 +9,7 @@ from app.roles import normalize_official_role
 from app.services.audit_log import append_incident_log, get_ticket_logbook
 from app.services.email_service import send_ticket_update_email
 from app.services.notification_service import send_sms, send_whatsapp
-from app.services.progress_ai import predict_ticket_progress
+from app.services.progress_ai import MIN_PROGRESS_PERCENT, predict_ticket_progress
 from app.utils import serialize_doc, serialize_list, to_object_id
 
 router = APIRouter(prefix="/api/tickets")
@@ -214,6 +214,41 @@ def _resolve_field_inspector_last_update_at(doc: dict, user_id: str | None = Non
             return progress_updated_at
 
     return None
+
+
+def _reopened_timestamp(doc: dict) -> datetime | None:
+    reopened_by = doc.get("reopenedBy")
+    if isinstance(reopened_by, dict):
+        return _parse_iso_datetime(str(reopened_by.get("timestamp") or "").strip())
+    return None
+
+
+def _collect_recent_progress_notes(doc: dict, limit: int = 8) -> list[str]:
+    notes = doc.get("notes")
+    if not isinstance(notes, list) or limit <= 0:
+        return []
+
+    reopened_at = _reopened_timestamp(doc)
+    collected: list[str] = []
+    for row in notes:
+        if isinstance(row, dict):
+            created_at = _parse_iso_datetime(str(row.get("createdAt") or "").strip())
+            if reopened_at:
+                if not created_at:
+                    continue
+                if created_at < reopened_at:
+                    continue
+            text = str(row.get("note") or "").strip()
+        else:
+            if reopened_at:
+                continue
+            text = str(row or "").strip()
+        if text:
+            collected.append(text)
+
+    if not collected:
+        return []
+    return collected[-limit:]
 
 
 def _can_access_ticket_logbook(doc: dict, current_user: dict) -> bool:
@@ -751,8 +786,8 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         }
         # Restart progress lifecycle when a resolved case is reopened.
         update["progressSummary"] = ""
-        update["progressPercent"] = 0
-        update["progressSource"] = "reopened_reset"
+        update["progressPercent"] = MIN_PROGRESS_PERCENT
+        update["progressSource"] = "reopened_reset_min"
         update["progressConfidence"] = 1.0
         update["progressUpdatedAt"] = now
         update["lastInspectorUpdateAt"] = ""
@@ -1121,7 +1156,19 @@ def update_ticket_progress(
                 detail="Only your latest field inspector log can be edited",
             )
 
-    prediction = predict_ticket_progress(update_text)
+    previous_status = (existing.get("status") or "").strip().lower()
+    prediction_status = "in_progress" if previous_status in {"open", "pending", "verified"} else previous_status
+    prediction = predict_ticket_progress(
+        update_text,
+        context={
+            "ticketType": existing.get("category"),
+            "priority": existing.get("priority"),
+            "status": prediction_status,
+            "currentPercent": existing.get("progressPercent"),
+            "previousUpdates": _collect_recent_progress_notes(existing),
+            "reopened": _is_reopened_case(existing),
+        },
+    )
     now = _now_iso()
     progress_percent = int(max(0, min(100, prediction.percent)))
     confidence = round(max(0.0, min(1.0, float(prediction.confidence))), 4)
@@ -1134,7 +1181,6 @@ def update_ticket_progress(
         "progressUpdatedAt": now,
         "updatedAt": now,
     }
-    previous_status = (existing.get("status") or "").strip().lower()
     if previous_status in {"open", "pending", "verified"}:
         set_payload["status"] = "in_progress"
     if role == ROLE_FIELD_INSPECTOR:

@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.database import incidents
+from app.services.pincode_service import get_pincode_index_info, get_pincode_record, normalize_pincode
 from app.utils import serialize_list
 
 router = APIRouter(prefix="/api/public")
@@ -30,4 +31,25 @@ def summary():
             "resolutionRate": resolution_rate,
             "recent": serialize_list(recent)
         }
+    }
+
+
+@router.get("/pincode/{pincode}")
+def verify_pincode(pincode: str):
+    normalized = normalize_pincode(pincode)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="pincode must be a valid 6-digit number")
+
+    record = get_pincode_record(normalized)
+    if not record:
+        raise HTTPException(status_code=404, detail="pincode not found")
+
+    info = get_pincode_index_info()
+    return {
+        "success": True,
+        "data": {
+            **record,
+            "datasetCount": info.get("count"),
+            "datasetSource": info.get("sourcePath"),
+        },
     }

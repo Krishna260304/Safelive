@@ -17,9 +17,24 @@ export interface PublicSummary {
   }[];
 }
 
+export interface PincodeLookup {
+  pincode: string;
+  taluk: string;
+  district: string;
+  state: string;
+  datasetCount: number;
+  datasetSource: string;
+}
+
 export const publicService = {
   async getSummary(): Promise<ApiResponse<PublicSummary>> {
     return apiClient.get<PublicSummary>('/public/summary', {
+      headers: {}
+    });
+  },
+
+  async verifyPincode(pincode: string): Promise<ApiResponse<PincodeLookup>> {
+    return apiClient.get<PincodeLookup>(`/public/pincode/${encodeURIComponent(pincode)}`, {
       headers: {}
     });
   }

@@ -66,6 +66,7 @@ class Settings:
 
     BASE_DIR = _BASE_DIR
     IMAGE_DIR = os.getenv("IMAGE_DIR", str(BASE_DIR / "images"))
+    PINCODE_CSV_PATH = os.getenv("PINCODE_CSV_PATH", "")
 
     EMAIL_ENABLED = _env_bool("EMAIL_ENABLED", True)
     EMAIL_USER = os.getenv("EMAIL_USER", "safelive.alerts@gmail.com")
@@ -124,7 +125,7 @@ class Settings:
     PRIORITY_AI_TEXT_WEIGHT = _env_float("PRIORITY_AI_TEXT_WEIGHT", 0.3)
     PRIORITY_AI_DATASET_WEIGHT = _env_float("PRIORITY_AI_DATASET_WEIGHT", 0.2)
     PROGRESS_AI_ENABLED = _env_bool("PROGRESS_AI_ENABLED", True)
-    PROGRESS_AI_MODEL = os.getenv("PROGRESS_AI_MODEL", "typeform/distilbert-base-uncased-mnli")
+    PROGRESS_AI_MODEL = os.getenv("PROGRESS_AI_MODEL", "facebook/bart-large-mnli")
     PROGRESS_AI_OFFLINE_MODE = _env_bool("PROGRESS_AI_OFFLINE_MODE", False)
     PROGRESS_AI_REQUEST_TIMEOUT_SECONDS = _env_int("PROGRESS_AI_REQUEST_TIMEOUT_SECONDS", 10)
     LOGBOOK_AI_ENABLED = _env_bool("LOGBOOK_AI_ENABLED", True)

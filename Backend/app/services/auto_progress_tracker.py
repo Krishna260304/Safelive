@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config.settings import settings
 from app.database import incidents, tickets
@@ -26,6 +26,41 @@ def _normalize_status(value: str | None) -> str:
     return status
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _is_reopened_case(doc: dict) -> bool:
+    reopened_by = doc.get("reopenedBy")
+    if isinstance(reopened_by, dict):
+        if any(str(reopened_by.get(key) or "").strip() for key in ("id", "name", "timestamp")):
+            return True
+    elif reopened_by:
+        return True
+
+    reopen_warning = doc.get("reopenWarning")
+    if isinstance(reopen_warning, dict) and any(str(value or "").strip() for value in reopen_warning.values()):
+        return True
+    return False
+
+
+def _reopened_timestamp(doc: dict) -> datetime | None:
+    reopened_by = doc.get("reopenedBy")
+    if isinstance(reopened_by, dict):
+        return _parse_iso_datetime(str(reopened_by.get("timestamp") or "").strip())
+    return None
+
+
 def _has_assigned_workers(doc: dict) -> bool:
     worker_id = str(doc.get("workerId") or "").strip()
     if worker_id:
@@ -45,23 +80,41 @@ def _has_assigned_workers(doc: dict) -> bool:
     return False
 
 
+def _recent_note_texts(doc: dict, limit: int = 8) -> list[str]:
+    notes = doc.get("notes")
+    if not isinstance(notes, list) or limit <= 0:
+        return []
+
+    reopened_at = _reopened_timestamp(doc)
+    values: list[str] = []
+    for row in notes:
+        if isinstance(row, dict):
+            created_at = _parse_iso_datetime(str(row.get("createdAt") or "").strip())
+            if reopened_at:
+                if not created_at:
+                    continue
+                if created_at < reopened_at:
+                    continue
+            note_text = str(row.get("note") or "").strip()
+        else:
+            if reopened_at:
+                continue
+            note_text = str(row or "").strip()
+        if note_text:
+            values.append(note_text)
+    if not values:
+        return []
+    return values[-limit:]
+
+
 def _latest_note_text(doc: dict) -> str:
     summary = str(doc.get("progressSummary") or "").strip()
     if summary:
         return summary
 
-    notes = doc.get("notes")
-    if not isinstance(notes, list):
-        return ""
-    for row in reversed(notes):
-        if isinstance(row, dict):
-            note = str(row.get("note") or "").strip()
-            if note:
-                return note
-        else:
-            note = str(row or "").strip()
-            if note:
-                return note
+    recent = _recent_note_texts(doc, limit=1)
+    if recent:
+        return recent[0]
     return ""
 
 
@@ -94,7 +147,18 @@ def _estimate_ticket_progress(doc: dict) -> tuple[int, float, str]:
     if status == "open" and not has_team:
         return 0, 1.0, "awaiting_assignment"
 
-    prediction = predict_ticket_progress(_build_progress_context(doc))
+    latest_update = _latest_note_text(doc)
+    prediction = predict_ticket_progress(
+        latest_update or _build_progress_context(doc),
+        context={
+            "ticketType": doc.get("category"),
+            "priority": doc.get("priority"),
+            "status": status,
+            "currentPercent": doc.get("progressPercent"),
+            "previousUpdates": _recent_note_texts(doc),
+            "reopened": _is_reopened_case(doc),
+        },
+    )
     percent = int(max(0, min(100, prediction.percent)))
 
     # Keep open tickets in early-progress range.
