@@ -218,6 +218,10 @@ export const ticketService = {
     return apiClient.get<TicketLogEntry[]>(API_ENDPOINTS.TICKETS.LOGBOOK(id));
   },
 
+  async deleteLogbookEntry(ticketId: string, entryId: string): Promise<ApiResponse<{ message?: string }>> {
+    return apiClient.delete<{ message?: string }>(API_ENDPOINTS.TICKETS.DELETE_LOGBOOK_ENTRY(ticketId, entryId));
+  },
+
   
 
   async getStats(): Promise<ApiResponse<TicketStats>> {

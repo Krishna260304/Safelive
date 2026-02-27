@@ -63,6 +63,7 @@ export const API_ENDPOINTS = {
     ASSIGN_SUPERVISOR: (id: string) => `/tickets/${id}/assign-supervisor`,
     PROGRESS_UPDATE: (id: string) => `/tickets/${id}/progress-update`,
     LOGBOOK: (id: string) => `/tickets/${id}/logbook`,
+    DELETE_LOGBOOK_ENTRY: (ticketId: string, entryId: string) => `/tickets/${ticketId}/logbook/${entryId}`,
     STATS: '/tickets/stats',
   },
 

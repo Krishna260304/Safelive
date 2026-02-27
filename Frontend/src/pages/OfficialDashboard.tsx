@@ -119,21 +119,42 @@ const parseIsoMillis = (value?: string): number | null => {
 
 const getFieldInspectorEditWindowMsLeft = (ticket: Ticket, currentUserId: string): number => {
   const inspectorId = (ticket.fieldInspectorId || '').trim();
-  if (!currentUserId) return -1;
-  if (inspectorId && inspectorId !== currentUserId) return -1;
+  if (!currentUserId) {
+    return -1;
+  }
+  if (inspectorId && inspectorId !== currentUserId) {
+    return -1;
+  }
   const lastUpdateMs = parseIsoMillis(ticket.lastInspectorUpdateAt);
-  if (lastUpdateMs === null) return -1;
-  return lastUpdateMs + FIELD_INSPECTOR_EDIT_WINDOW_MS - Date.now();
+  if (lastUpdateMs === null) {
+    return -1;
+  }
+  // No time limit - inspectors can always edit their last update
+  return 1;
 };
 
 const isFieldInspectorEditWindowActive = (ticket: Ticket, currentUserId: string): boolean =>
   getFieldInspectorEditWindowMsLeft(ticket, currentUserId) >= 0;
 
+const LOGBOOK_ID_TOKEN_REGEX = /\b[a-f0-9]{24}\b/gi;
+
+const stripLogbookIds = (value: string): string =>
+  (value || '')
+    .replace(LOGBOOK_ID_TOKEN_REGEX, '')
+    .replace(/\(\s*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
 const logbookDetailText = (details: Record<string, unknown> | undefined): string => {
   if (!details || Object.keys(details).length === 0) return 'No extra details';
   const isHiddenDetailKey = (key: string) => {
     const normalized = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
-    return normalized === 'workerid' || normalized === 'workerids';
+    return (
+      normalized === 'workerid' ||
+      normalized === 'workerids' ||
+      normalized.endsWith('id') ||
+      normalized.endsWith('ids')
+    );
   };
 
   const stringify = (value: unknown): string => {
@@ -148,7 +169,7 @@ const logbookDetailText = (details: Record<string, unknown> | undefined): string
         return String(value);
       }
     }
-    return String(value);
+    return stripLogbookIds(String(value));
   };
 
   const visibleEntries = Object.entries(details).filter(([key]) => !isHiddenDetailKey(key));
@@ -162,14 +183,14 @@ const logbookDetailText = (details: Record<string, unknown> | undefined): string
 const asCleanText = (value: unknown): string => String(value || '').trim();
 
 const sanitizeLogbookSummary = (value: string): string => {
-  let text = (value || '').trim();
+  let text = stripLogbookIds((value || '').trim());
   if (!text) return '';
   text = text.replace(/\s+/g, ' ');
 
   const detailsActorMatch = text.match(/^details:\s*(.+?)\s*actor:\s*(.+?)\.?$/i);
   if (detailsActorMatch) {
-    const detailsPart = detailsActorMatch[1].trim().replace(/[. ]+$/g, '');
-    const actorPart = detailsActorMatch[2].trim().replace(/[. ]+$/g, '');
+    const detailsPart = stripLogbookIds(detailsActorMatch[1].trim().replace(/[. ]+$/g, ''));
+    const actorPart = stripLogbookIds(detailsActorMatch[2].trim().replace(/[. ]+$/g, ''));
     if (detailsPart && actorPart) {
       return `${detailsPart} by ${actorPart}.`;
     }
@@ -177,6 +198,7 @@ const sanitizeLogbookSummary = (value: string): string => {
 
   text = text.replace(/^details:\s*/i, '').trim();
   text = text.replace(/\s*actor:\s*([^.;]+)/gi, (_match, actorPart: string) => ` by ${actorPart.trim()}`).trim();
+  text = stripLogbookIds(text);
   text = text.replace(/\bis an actor\b/gi, '').trim();
   if (/\bactor\b/i.test(text)) {
     return '';
@@ -196,47 +218,63 @@ const toProgressPercentText = (value: unknown): string => {
   return text.endsWith('%') ? text : `${text}%`;
 };
 
+const toSentenceLine = (value: string): string => {
+  const cleaned = stripLogbookIds((value || '').trim()).replace(/\s*\|\s*/g, ', ').replace(/\s+/g, ' ').trim();
+  if (!cleaned) return '';
+  return /[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`;
+};
+
 const formatLogbookDetails = (entry: TicketLogEntry): string => {
   const action = (entry.action || '').trim().toLowerCase();
   const details = entry.details || {};
   if (action === 'field_inspector_progress_update' || action === 'field_inspector_progress_update_edited') {
-    const updateText = asCleanText(details.updateText);
+    const updateText = stripLogbookIds(asCleanText(details.updateText));
     const progressPercentText = toProgressPercentText(details.progressPercent);
-    const prefix = action === 'field_inspector_progress_update_edited' ? 'Field inspector edited update' : 'Field inspector update';
+    const prefix = action === 'field_inspector_progress_update_edited' ? 'Field inspector edited the update' : 'Field inspector provided an update';
     if (updateText && progressPercentText) {
-      return `${prefix}: ${updateText} (${progressPercentText} progress)`;
+      return toSentenceLine(`${prefix}: ${updateText} (${progressPercentText} progress)`);
     }
     if (updateText) {
-      return `${prefix}: ${updateText}`;
+      return toSentenceLine(`${prefix}: ${updateText}`);
     }
     if (progressPercentText) {
-      return `${prefix}: ${progressPercentText} progress`;
+      return toSentenceLine(`${prefix}: ${progressPercentText} progress`);
     }
-    return prefix;
-  }
-  const summary = sanitizeLogbookSummary((entry.summary || '').trim());
-  if (summary) {
-    return summary;
+    return toSentenceLine(prefix);
   }
 
-  if (action === 'reopened_ticket_supervisor_assigned_by_department') {
-    const supervisorName = asCleanText(details.supervisorName);
-    const supervisorId = asCleanText(details.supervisorId);
-    if (supervisorName && supervisorId) {
-      return `Department assigned supervisor ${supervisorName} (ID: ${supervisorId})`;
-    }
+  if (action === 'reopened_ticket_supervisor_assigned_by_department' || action.includes('supervisor_assigned_by_department')) {
+    const supervisorName = stripLogbookIds(asCleanText(details.supervisorName));
     if (supervisorName) {
-      return `Department assigned supervisor ${supervisorName}`;
+      return `Department assigned supervisor ${supervisorName} for this reopened ticket.`;
     }
-    if (supervisorId) {
-      return `Department assigned supervisor ID ${supervisorId}`;
+    return 'Department assigned a supervisor for this reopened ticket.';
+  }
+
+  if (action === 'ticket_reopened_by_department' || action.includes('reopened_by_department')) {
+    const fromStatus = asCleanText(details.fromStatus).replace(/_/g, ' ');
+    const toStatus = asCleanText(details.toStatus).replace(/_/g, ' ');
+    if (fromStatus && toStatus) {
+      return `Department reopened the ticket from ${fromStatus} to ${toStatus}.`;
     }
-    return 'Department assigned a supervisor for this reopened ticket';
+    if (toStatus) {
+      return `Department reopened the ticket to ${toStatus}.`;
+    }
+    return 'Department reopened the ticket.';
+  }
+
+  const summary = sanitizeLogbookSummary((entry.summary || '').trim());
+  if (summary) {
+    return toSentenceLine(summary);
   }
 
   const actionText = formatActionLabel(entry.action);
   const detailText = logbookDetailText(details);
-  return detailText === 'No extra details' ? actionText : `${actionText} | ${detailText}`;
+  const cleanedDetailText = stripLogbookIds(detailText);
+  if (cleanedDetailText === 'No extra details') {
+    return toSentenceLine(actionText);
+  }
+  return toSentenceLine(`${actionText}: ${cleanedDetailText}`);
 };
 
 const workerLabel = (name?: string, workerCode?: string) => {
@@ -348,6 +386,7 @@ const OfficialDashboard = () => {
   const [logbookTicket, setLogbookTicket] = useState<Ticket | null>(null);
   const [logbookEntries, setLogbookEntries] = useState<TicketLogEntry[]>([]);
   const [logbookError, setLogbookError] = useState<string | null>(null);
+  const [deletingLogEntryId, setDeletingLogEntryId] = useState<string | null>(null);
   const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
   const [ticketDetailsDialogOpen, setTicketDetailsDialogOpen] = useState(false);
   const [ticketDetailsLoading, setTicketDetailsLoading] = useState(false);
@@ -432,12 +471,26 @@ const OfficialDashboard = () => {
     return { total, open, inProgress, resolved };
   }, [tickets]);
 
+  const latestDeletableLogId = useMemo(() => {
+    if (role !== 'field_inspector' || !currentUserId) return '';
+    const latestEntry = logbookEntries[0];
+    if (!latestEntry) return '';
+    const isOwnedByInspector =
+      (latestEntry.actorUserId || '').trim() === currentUserId &&
+      (latestEntry.actorOfficialRole || '').trim() === 'field_inspector' &&
+      ['field_inspector_progress_update', 'field_inspector_progress_update_edited'].includes((latestEntry.action || '').trim());
+    return isOwnedByInspector ? latestEntry.id : '';
+  }, [currentUserId, logbookEntries, role]);
+
   const logbookRows = useMemo(() => {
     return logbookEntries.map((entry) => {
       const details = formatLogbookDetails(entry);
       const actorName = (entry.actorName || 'System').trim();
       const roleName = (entry.actorOfficialRole || '').trim();
       const actor = roleName ? `${actorName} (${roleName})` : actorName;
+      const canDelete =
+        role === 'field_inspector' &&
+        entry.id === latestDeletableLogId;
       return {
         id: entry.id,
         location: resolveLogbookLocation(entry, logbookTicket),
@@ -445,9 +498,10 @@ const OfficialDashboard = () => {
         actor,
         date: formatLogbookDate(entry.createdAt),
         time: formatLogbookTime(entry.createdAt),
+        canDelete,
       };
     });
-  }, [logbookEntries, logbookTicket]);
+  }, [logbookEntries, logbookTicket, latestDeletableLogId, role]);
 
   const downloadBlob = useCallback((filename: string, mime: string, content: string) => {
     const blob = new Blob([content], { type: mime });
@@ -719,17 +773,9 @@ const OfficialDashboard = () => {
   };
 
   const handleStartEditProgress = useCallback((ticket: Ticket) => {
-    if (!isFieldInspectorEditWindowActive(ticket, currentUserId)) {
-      toast({
-        title: 'Edit Window Closed',
-        description: 'Field inspector updates can be edited only within 10 minutes of submission.',
-        variant: 'destructive',
-      });
-      return;
-    }
     setProgressDrafts((prev) => ({ ...prev, [ticket.id]: ticket.progressSummary || '' }));
     setEditingProgressByTicket((prev) => ({ ...prev, [ticket.id]: true }));
-  }, [currentUserId, toast]);
+  }, []);
 
   const handleCancelEditProgress = useCallback((ticketId: string) => {
     setEditingProgressByTicket((prev) => {
@@ -755,17 +801,6 @@ const OfficialDashboard = () => {
       return;
     }
     const isEditing = Boolean(editingProgressByTicket[ticketId]);
-    const ticket = tickets.find((row) => row.id === ticketId);
-    if (role === 'field_inspector' && isEditing) {
-      if (!ticket || !isFieldInspectorEditWindowActive(ticket, currentUserId)) {
-        toast({
-          title: 'Edit Window Closed',
-          description: 'Field inspector updates can be edited only within 10 minutes of submission.',
-          variant: 'destructive',
-        });
-        return;
-      }
-    }
 
     setProgressSubmittingId(ticketId);
     try {
@@ -781,6 +816,12 @@ const OfficialDashboard = () => {
         });
         return;
       }
+      
+      // Update the ticket immediately with the response data
+      if (response.data) {
+        patchTicket(ticketId, response.data);
+      }
+      
       toast({
         title: isEditing ? 'Update Edited' : 'Progress Updated',
         description: isEditing
@@ -797,9 +838,36 @@ const OfficialDashboard = () => {
         delete next[ticketId];
         return next;
       });
-      await refetchTickets();
+      // Don't refetch immediately - let the patch take effect
+      // The automatic polling (every 15 seconds) will sync any server changes
     } finally {
       setProgressSubmittingId(null);
+    }
+  };
+
+  const handleDeleteLogbookEntry = async (entryId: string) => {
+    if (!logbookTicket) return;
+    if (!window.confirm('Delete this log entry? This action cannot be undone.')) return;
+
+    setDeletingLogEntryId(entryId);
+    try {
+      const response = await ticketService.deleteLogbookEntry(logbookTicket.id, entryId);
+      if (!response.success) {
+        toast({
+          title: 'Delete Failed',
+          description: response.error || 'Could not delete this log entry.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      setLogbookEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+      toast({
+        title: 'Log Deleted',
+        description: 'Selected logbook entry has been removed.',
+      });
+    } finally {
+      setDeletingLogEntryId(null);
     }
   };
 
@@ -996,7 +1064,7 @@ const OfficialDashboard = () => {
               const canAssignWorkers = canRoleRunWorkflow && canAssignWorkersStep;
               const canResolve = canRoleRunWorkflow && canResolveStep;
               const fieldInspectorWindowAvailable =
-                role !== 'field_inspector' || ['verified', 'in_progress'].includes(ticket.status);
+                role !== 'field_inspector' || ['open', 'pending', 'verified', 'in_progress'].includes(ticket.status);
               const showProgressEditor =
                 isTicketsPage && role === 'field_inspector' && fieldInspectorWindowAvailable;
               const showOfficialActions = isTicketsPage && (role === 'department' || role === 'supervisor');
@@ -1245,13 +1313,9 @@ const OfficialDashboard = () => {
                                     <Pencil className="h-3.5 w-3.5 mr-1" />
                                     Edit last update
                                   </Button>
-                                  {inspectorEditWindowActive ? (
-                                    <span className="text-primary font-medium">
-                                      Edit available for ~{inspectorEditMinutesLeft} min
-                                    </span>
-                                  ) : (
-                                    <span>Edit window closed (10-minute limit).</span>
-                                  )}
+                                  <span className="text-muted-foreground">
+                                    You can edit this update anytime
+                                  </span>
                                 </>
                               )}
                             </div>
@@ -1390,6 +1454,16 @@ const OfficialDashboard = () => {
                       <td className="border border-[#c2cbd6] px-3 py-2 align-top">
                         <div className="text-[#2f3b49]">{row.details}</div>
                         <div className="mt-1 text-[13px] text-[#66788d]">{row.actor}</div>
+                        {row.canDelete && (
+                          <button
+                            type="button"
+                            className="mt-2 text-xs font-medium text-destructive hover:underline disabled:opacity-60"
+                            disabled={deletingLogEntryId === row.id}
+                            onClick={() => void handleDeleteLogbookEntry(row.id)}
+                          >
+                            {deletingLogEntryId === row.id ? 'Deleting...' : 'Delete this log'}
+                          </button>
+                        )}
                       </td>
                       <td className="border border-[#c2cbd6] px-3 py-2 align-top whitespace-nowrap">{row.date}</td>
                       <td className="border border-[#c2cbd6] px-3 py-2 align-top whitespace-nowrap">{row.time}</td>

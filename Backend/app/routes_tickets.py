@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user, get_official_user, is_official_account
-from app.database import incidents, tickets, users
+from app.database import incident_logs, incidents, tickets, users
 from app.models import TicketAssign, TicketAssignSupervisor, TicketProgressUpdate, TicketUpdateStatus
 from app.roles import normalize_official_role
 from app.services.audit_log import append_incident_log, get_ticket_logbook
@@ -21,8 +21,8 @@ ROLE_FIELD_INSPECTOR = "field_inspector"
 ROLE_WORKER = "worker"
 TICKET_STATUSES = {"open", "pending", "in_progress", "verified", "resolved"}
 FIELD_INSPECTOR_EDIT_WINDOW_MINUTES = 10
-FIELD_INSPECTOR_VISIBLE_STATUSES = {"verified", "in_progress", "resolved"}
-FIELD_INSPECTOR_EDITABLE_STATUSES = {"verified", "in_progress"}
+FIELD_INSPECTOR_VISIBLE_STATUSES = {"open", "pending", "verified", "in_progress", "resolved"}
+FIELD_INSPECTOR_EDITABLE_STATUSES = {"open", "pending", "verified", "in_progress"}
 FIELD_INSPECTOR_NOTE_PREFIXES = (
     "field inspector update",
     "field inspector progress update",
@@ -430,6 +430,42 @@ def _update_latest_inspector_note(
         updated[index] = next_note
         return updated
     return None
+
+
+def _is_deletable_field_inspector_log(entry: dict, user_id: str) -> bool:
+    if not isinstance(entry, dict) or not user_id:
+        return False
+    action = str(entry.get("action") or "").strip().lower()
+    if action not in {"field_inspector_progress_update", "field_inspector_progress_update_edited"}:
+        return False
+    actor_role = normalize_official_role(entry.get("actorOfficialRole"))
+    if actor_role != ROLE_FIELD_INSPECTOR:
+        return False
+    actor_user_id = str(entry.get("actorUserId") or "").strip()
+    return actor_user_id == user_id
+
+
+def _ticket_id_selectors(ticket_id: str) -> list[object]:
+    selectors: list[object] = [ticket_id]
+    try:
+        selectors.append(to_object_id(ticket_id))
+    except Exception:
+        pass
+    return selectors
+
+
+def _latest_ticket_log_entry(ticket_id: str) -> dict | None:
+    selectors = _ticket_id_selectors(ticket_id)
+    return incident_logs.find_one({"ticketId": {"$in": selectors}}, sort=[("createdAt", -1)])
+
+
+def _latest_editable_field_inspector_log(ticket_id: str, user_id: str) -> dict | None:
+    latest_entry = _latest_ticket_log_entry(ticket_id)
+    if not latest_entry:
+        return None
+    if not _is_deletable_field_inspector_log(latest_entry, user_id):
+        return None
+    return latest_entry
 
 
 def _extract_worker_ids_from_ticket(doc: dict) -> list[str]:
@@ -1053,7 +1089,7 @@ def update_ticket_progress(
     if role == ROLE_FIELD_INSPECTOR and not _is_field_inspector_ticket_eligible(existing):
         raise HTTPException(
             status_code=400,
-            detail="Field inspector ticket window is available only after issue verification",
+            detail="Field inspector updates are only available for active tickets (not resolved)",
         )
 
     update_text = (payload.updateText or "").strip()
@@ -1062,6 +1098,7 @@ def update_ticket_progress(
     edit_requested = bool(payload.editLastUpdate and role == ROLE_FIELD_INSPECTOR)
     current_user_id = str(current_user.get("id") or "").strip()
     editable_reference = None
+    editable_log_entry = None
 
     if edit_requested:
         latest_inspector_id = str(existing.get("fieldInspectorId") or "").strip()
@@ -1076,13 +1113,12 @@ def update_ticket_progress(
                 detail="Only the original field inspector can edit this update",
             )
         editable_reference = _resolve_field_inspector_last_update_at(existing, current_user_id)
-        if not _field_inspector_edit_window_active(editable_reference):
+        # No time limit - field inspectors can edit their updates anytime
+        editable_log_entry = _latest_editable_field_inspector_log(ticket_id, current_user_id)
+        if editable_log_entry is None:
             raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Field inspector updates can be edited only within "
-                    f"{FIELD_INSPECTOR_EDIT_WINDOW_MINUTES} minutes of submission"
-                ),
+                status_code=403,
+                detail="Only your latest field inspector log can be edited",
             )
 
     prediction = predict_ticket_progress(update_text)
@@ -1150,23 +1186,90 @@ def update_ticket_progress(
             doc,
             incident_updates,
         )
-        if role == ROLE_FIELD_INSPECTOR:
-            action = "field_inspector_progress_update_edited" if edit_requested else "field_inspector_progress_update"
+        if role == ROLE_FIELD_INSPECTOR and edit_requested and editable_log_entry is not None:
+            incident_logs.update_one(
+                {"_id": editable_log_entry.get("_id")},
+                {
+                    "$set": {
+                        "action": "field_inspector_progress_update_edited",
+                        "createdAt": now,
+                        "summary": f"Field inspector edited update: {update_text} ({progress_percent}% progress)",
+                        "details": {
+                            "progressPercent": doc.get("progressPercent"),
+                            "progressConfidence": doc.get("progressConfidence"),
+                            "progressSource": doc.get("progressSource"),
+                            "updateText": update_text,
+                            "edited": True,
+                        },
+                    }
+                },
+            )
+        elif role == ROLE_FIELD_INSPECTOR:
+            _record_ticket_log(
+                "field_inspector_progress_update",
+                doc,
+                current_user,
+                details={
+                    "progressPercent": doc.get("progressPercent"),
+                    "progressConfidence": doc.get("progressConfidence"),
+                    "progressSource": doc.get("progressSource"),
+                    "updateText": update_text,
+                    "edited": False,
+                },
+            )
         else:
             action = "worker_progress_update"
-        _record_ticket_log(
-            action,
-            doc,
-            current_user,
-            details={
-                "progressPercent": doc.get("progressPercent"),
-                "progressConfidence": doc.get("progressConfidence"),
-                "progressSource": doc.get("progressSource"),
-                "updateText": update_text,
-                "edited": edit_requested,
-            },
-        )
+            _record_ticket_log(
+                action,
+                doc,
+                current_user,
+                details={
+                    "progressPercent": doc.get("progressPercent"),
+                    "progressConfidence": doc.get("progressConfidence"),
+                    "progressSource": doc.get("progressSource"),
+                    "updateText": update_text,
+                    "edited": False,
+                },
+            )
     return {"success": True, "data": serialize_doc(doc)}
+
+
+@router.delete("/{ticket_id}/logbook/{entry_id}")
+def delete_ticket_logbook_entry(
+    ticket_id: str,
+    entry_id: str,
+    current_user: dict = Depends(get_official_user),
+):
+    role = _current_official_role(current_user)
+    if role != ROLE_FIELD_INSPECTOR:
+        raise HTTPException(status_code=403, detail="Only field inspectors can delete logbook entries")
+
+    ticket_doc = _get_ticket_doc(ticket_id)
+    if not _can_access_ticket_logbook(ticket_doc, current_user):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    try:
+        entry_obj_id = to_object_id(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid logbook entry id")
+
+    ticket_selectors = _ticket_id_selectors(ticket_id)
+
+    entry = incident_logs.find_one({"_id": entry_obj_id, "ticketId": {"$in": ticket_selectors}})
+    if not entry:
+        raise HTTPException(status_code=404, detail="Logbook entry not found")
+
+    current_user_id = str(current_user.get("id") or "").strip()
+    if not _is_deletable_field_inspector_log(entry, current_user_id):
+        raise HTTPException(status_code=403, detail="You can only delete your own field inspector updates")
+
+    latest_entry = _latest_ticket_log_entry(ticket_id)
+    latest_entry_id = str((latest_entry or {}).get("_id") or "")
+    if latest_entry_id != str(entry_obj_id):
+        raise HTTPException(status_code=403, detail="Only the latest logbook entry can be deleted")
+
+    incident_logs.delete_one({"_id": entry_obj_id})
+    return {"success": True, "message": "Logbook entry deleted"}
 
 
 @router.get("/{ticket_id}/logbook")

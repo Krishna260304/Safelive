@@ -245,7 +245,7 @@ const ReportIncident = () => {
     setLocationError('');
   };
 
-  const useLiveGpsInDialog = async () => {
+  const applyLiveGpsInDialog = async () => {
     const gps = await fetchGpsLocation(true);
     if (gps) {
       setLocationDraft(gps);
@@ -538,7 +538,7 @@ const ReportIncident = () => {
                   ? `Draft: ${locationDraft.lat.toFixed(6)}, ${locationDraft.lon.toFixed(6)} (${locationDraft.source === 'live_gps' ? 'Live GPS' : 'Map Picker'})`
                   : 'No draft location selected.'}
               </div>
-              <Button type="button" variant="outline" size="sm" onClick={() => void useLiveGpsInDialog()} disabled={isLocating}>
+              <Button type="button" variant="outline" size="sm" onClick={() => void applyLiveGpsInDialog()} disabled={isLocating}>
                 {isLocating ? 'Locating...' : 'Use Live GPS'}
               </Button>
             </div>
