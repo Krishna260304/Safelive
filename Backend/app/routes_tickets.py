@@ -289,20 +289,13 @@ def _is_verified_ticket(doc: dict) -> bool:
 def _field_inspector_update_locked(doc: dict) -> bool:
     if not isinstance(doc, dict):
         return False
-    if str(doc.get("updatesVerifiedAt") or "").strip():
-        return True
-    ticket_id = str(doc.get("_id") or doc.get("id") or "").strip()
-    if not ticket_id:
+    latest_update_at = _parse_iso_datetime(str(doc.get("lastInspectorUpdateAt") or "").strip())
+    if not latest_update_at:
         return False
-    selectors = _ticket_id_selectors(ticket_id)
-    verification_log = incident_logs.find_one(
-        {
-            "ticketId": {"$in": selectors},
-            "action": {"$in": ["ticket_verified_by_supervisor", "ticket_verified_by_department"]},
-            "details.fromStatus": "in_progress",
-        }
-    )
-    return verification_log is not None
+    updates_verified_at = _parse_iso_datetime(str(doc.get("updatesVerifiedAt") or "").strip())
+    if not updates_verified_at:
+        return False
+    return updates_verified_at >= latest_update_at
 
 
 def _reopened_supervisor_id(doc: dict) -> str:

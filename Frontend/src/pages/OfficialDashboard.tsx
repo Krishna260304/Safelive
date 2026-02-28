@@ -138,7 +138,10 @@ const isFieldInspectorEditWindowActive = (ticket: Ticket, currentUserId: string)
 
 const isFieldInspectorUpdateLocked = (ticket?: Ticket | null): boolean => {
   if (!ticket) return false;
-  return Boolean((ticket.updatesVerifiedAt || '').trim());
+  const lastInspectorUpdateMs = parseIsoMillis(ticket.lastInspectorUpdateAt);
+  const updatesVerifiedMs = parseIsoMillis(ticket.updatesVerifiedAt);
+  if (lastInspectorUpdateMs === null || updatesVerifiedMs === null) return false;
+  return updatesVerifiedMs >= lastInspectorUpdateMs;
 };
 
 const LOGBOOK_ID_TOKEN_REGEX = /\b[a-f0-9]{24}\b/gi;
