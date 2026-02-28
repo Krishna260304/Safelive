@@ -26,6 +26,7 @@ from app.services.otp_service import (
     PURPOSE_ENABLE_2FA,
     PURPOSE_DISABLE_2FA,
 )
+from app.services.pincode_service import is_valid_pincode, normalize_pincode
 from app.utils import serialize_doc
 from app.roles import (
     OFFICIAL_ROLES,
@@ -91,6 +92,19 @@ def _is_valid_worker_code(value: str | None) -> bool:
     return bool(WORKER_CODE_PATTERN.fullmatch(str(value or "").strip()))
 
 
+def _validate_optional_pincode(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = normalize_pincode(text)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="pincode must be a valid 6-digit number")
+    if not is_valid_pincode(normalized):
+        raise HTTPException(status_code=400, detail="pincode not found")
+    return normalized
+
+
 def _generate_worker_code() -> str:
     for _ in range(200):
         code = f"{secrets.randbelow(900000) + 100000:06d}"
@@ -146,6 +160,7 @@ def register(user: RegisterModel, background_tasks: BackgroundTasks):
     data["userType"] = normalized_user_type
     data["officialRole"] = normalized_official_role
     data["workerSpecialization"] = normalized_worker_specialization
+    data["pincode"] = _validate_optional_pincode(user.pincode)
     if normalized_user_type == "official":
         data["department"] = _infer_department(normalized_official_role, normalized_worker_specialization)
     else:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -13,6 +13,7 @@ import { registrationSchema, RegistrationFormData } from '@/lib/validation';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
+import { publicService } from '@/services/public';
 
 const OFFICIAL_ROLE_OPTIONS = [
   { value: 'department', label: 'Department' },
@@ -42,6 +43,9 @@ export const RegisterForm = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCheckingPincode, setIsCheckingPincode] = useState(false);
+  const [pincodeLocation, setPincodeLocation] = useState('');
+  const latestPincodeRequest = useRef(0);
 
   const typeParam = searchParams.get('type');
   const roleParam = searchParams.get('role');
@@ -90,6 +94,49 @@ export const RegisterForm = () => {
     { label: 'One number', met: /[0-9]/.test(password) },
     { label: 'One special character', met: /[^A-Za-z0-9]/.test(password) },
   ];
+
+  const handlePincodeBlur = async (value: string) => {
+    const pincodeValue = value.trim();
+    if (!pincodeValue) {
+      setPincodeLocation('');
+      return;
+    }
+    if (!/^\d{6}$/.test(pincodeValue)) {
+      return;
+    }
+
+    const requestId = latestPincodeRequest.current + 1;
+    latestPincodeRequest.current = requestId;
+    setIsCheckingPincode(true);
+
+    try {
+      const response = await publicService.verifyPincode(pincodeValue);
+      if (latestPincodeRequest.current !== requestId) {
+        return;
+      }
+
+      if (!response.success || !response.data) {
+        setPincodeLocation('');
+        form.setError('pincode', {
+          type: 'manual',
+          message: response.error || 'pincode not found',
+        });
+        return;
+      }
+
+      form.clearErrors('pincode');
+      setPincodeLocation(`${response.data.taluk}, ${response.data.district}, ${response.data.state}`);
+    } catch {
+      if (latestPincodeRequest.current !== requestId) {
+        return;
+      }
+      setPincodeLocation('');
+    } finally {
+      if (latestPincodeRequest.current === requestId) {
+        setIsCheckingPincode(false);
+      }
+    }
+  };
 
   const handleSubmit = async (data: RegistrationFormData) => {
     setIsSubmitting(true);
@@ -331,7 +378,14 @@ export const RegisterForm = () => {
               inputMode="numeric"
               placeholder="123456"
               maxLength={6}
-              {...form.register('pincode')}
+              {...form.register('pincode', {
+                onChange: () => {
+                  setPincodeLocation('');
+                },
+                onBlur: (event) => {
+                  void handlePincodeBlur(event.target.value);
+                },
+              })}
               className={cn(
                 'w-32',
                 form.formState.errors.pincode && 'border-destructive focus-visible:ring-destructive'
@@ -341,6 +395,12 @@ export const RegisterForm = () => {
               <p className="text-sm text-destructive">
                 {form.formState.errors.pincode.message}
               </p>
+            )}
+            {!form.formState.errors.pincode && isCheckingPincode && (
+              <p className="text-xs text-muted-foreground">Verifying pincode...</p>
+            )}
+            {!form.formState.errors.pincode && pincodeLocation && (
+              <p className="text-xs text-success">{pincodeLocation}</p>
             )}
           </div>
 
