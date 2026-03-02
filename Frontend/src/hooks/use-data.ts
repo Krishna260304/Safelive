@@ -38,6 +38,7 @@ export const useIncidents = () => {
     if (response.success && response.data) {
       setIncidents(response.data);
     } else {
+      setIncidents([]);
       setError(response.error || 'Failed to fetch incidents');
     }
     setLoading(false);

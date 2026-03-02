@@ -1,11 +1,20 @@
 import atexit
+import logging
 import re
+import time
 from datetime import datetime, timezone
 from pymongo import MongoClient
 from bson import ObjectId
 from app.config.settings import settings
 
-client = MongoClient(settings.MONGO_URL)
+LOGGER = logging.getLogger(__name__)
+
+client = MongoClient(
+    settings.MONGO_URL,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=10000,
+)
 db = client[settings.DB_NAME]
 
 users = db["users"]
@@ -21,6 +30,26 @@ PUBLIC_TICKET_ID_PATTERN = re.compile(r"^(\d{4})(\d+)$")
 PUBLIC_INCIDENT_ID_PATTERN = re.compile(r"^(\d{4})(\d{4})$")
 
 atexit.register(client.close)
+
+
+def ensure_db_connection(max_retries: int = 3, retry_delay_seconds: float = 1.5):
+    last_error: Exception | None = None
+    retries = max(int(max_retries), 1)
+    delay = max(float(retry_delay_seconds), 0.1)
+
+    for attempt in range(1, retries + 1):
+        try:
+            client.admin.command("ping")
+            if attempt > 1:
+                LOGGER.info("MongoDB connection recovered on attempt %s.", attempt)
+            return
+        except Exception as exc:
+            last_error = exc
+            LOGGER.warning("MongoDB ping failed (attempt %s/%s): %s", attempt, retries, exc)
+            if attempt < retries:
+                time.sleep(delay)
+
+    raise RuntimeError(f"Unable to connect to MongoDB at {settings.MONGO_URL}: {last_error}")
 
 def cleanup_orphan_tickets():
     incident_id_set: set[str] = set()

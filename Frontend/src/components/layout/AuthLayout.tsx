@@ -1,6 +1,5 @@
 import { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Shield } from 'lucide-react';
 
 interface AuthLayoutProps {
   children: ReactNode;
@@ -20,12 +19,7 @@ export const AuthLayout = ({ children }: AuthLayoutProps) => {
         <header className="py-6 px-4">
           <div className="container max-w-6xl mx-auto">
             <Link to="/" className="inline-flex items-center gap-2 group">
-              <div className="p-2 rounded-xl gradient-hero shadow-soft group-hover:shadow-glow transition-shadow">
-                <Shield className="h-6 w-6 text-white" />
-              </div>
-              <span className="text-xl font-heading font-bold text-foreground">
-                SafeLive
-              </span>
+              <img src="/safelive-logo.png" alt="SafeLive" className="h-12 w-auto" />
             </Link>
           </div>
         </header>

@@ -10,7 +10,6 @@ import {
   MapPin,
   Menu,
   Settings,
-  Shield,
   User,
   UserPlus,
   X,
@@ -106,10 +105,8 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
           <Menu className="h-6 w-6" />
         </button>
         <Link to="/official/dashboard" className="mx-auto flex items-center gap-2 text-white">
-          <div className="rounded-lg bg-white/10 p-1.5">
-            <Shield className="h-5 w-5" />
-          </div>
-          <span className="font-heading font-bold">SafeLive Admin</span>
+          <img src="/safelive-logo.png" alt="SafeLive" className="h-10 w-auto" />
+          <span className="font-heading font-bold">Admin</span>
         </Link>
         <button onClick={() => setIsProfileOpen((prev) => !prev)} className="rounded-lg p-2 hover:bg-white/10">
           <User className="h-5 w-5" />
@@ -127,11 +124,8 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
         <div className="flex h-full flex-col">
           <div className="flex items-center justify-between border-b border-white/10 p-4">
             <Link to="/official/dashboard" className="flex items-center gap-2">
-              <div className="rounded-xl bg-white/10 p-2">
-                <Shield className="h-6 w-6" />
-              </div>
+              <img src="/safelive-logo.png" alt="SafeLive" className="h-12 w-auto" />
               <div>
-                <span className="block text-lg font-heading font-bold">SafeLive</span>
                 <span className="text-xs text-white/60">{roleLabelMap[role]}</span>
               </div>
             </Link>

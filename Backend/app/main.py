@@ -11,7 +11,7 @@ from app.routes_ws import router as ws_router
 from app.routes_users import router as users_router
 from app.routes_analytics import router as analytics_router
 from app.routes_public import router as public_router
-from app.database import init_db
+from app.database import ensure_db_connection, init_db
 from app.config.settings import settings
 from app.services.priority_ai import warmup_priority_model
 from app.services.progress_ai import warmup_progress_model
@@ -74,6 +74,7 @@ def _warmup_pincode_index_background():
 
 @app.on_event("startup")
 def startup():
+    ensure_db_connection()
     init_db()
     threading.Thread(target=_warmup_priority_model_background, daemon=True).start()
     threading.Thread(target=_warmup_progress_model_background, daemon=True).start()

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { Shield, Facebook, Twitter, Instagram, Linkedin, Mail, Phone, MapPin } from 'lucide-react';
+import { Facebook, Twitter, Instagram, Linkedin, Mail, Phone, MapPin } from 'lucide-react';
 
 export const Footer = () => {
   return (
@@ -9,9 +9,7 @@ export const Footer = () => {
           {}
           <div className="md:col-span-1">
             <Link to="/" className="inline-flex items-center gap-2 mb-4">
-              <div className="p-2 rounded-xl bg-white/10">
-                <Shield className="h-6 w-6" />
-              </div>
+              <img src="/safelive-logo.png" alt="SafeLive" className="h-12 w-auto" />
               <span className="text-xl font-heading font-bold">SafeLive</span>
             </Link>
             <p className="text-primary-foreground/70 text-sm leading-relaxed">

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Shield, Menu, X, ChevronDown } from 'lucide-react';
+import { Menu, X, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -14,9 +14,7 @@ export const Navbar = () => {
         <div className="flex items-center justify-between h-16">
           {}
           <Link to="/" className="flex items-center gap-2 group">
-            <div className="p-2 rounded-xl gradient-hero shadow-soft group-hover:shadow-glow transition-shadow">
-              <Shield className="h-5 w-5 text-white" />
-            </div>
+            <img src="/safelive-logo.png" alt="SafeLive" className="h-10 w-auto" />
             <span className="text-lg font-heading font-bold text-foreground">
               SafeLive
             </span>

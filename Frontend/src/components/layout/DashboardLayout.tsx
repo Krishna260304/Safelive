@@ -2,7 +2,6 @@ import { ReactNode, useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { 
   type LucideIcon,
-  Shield, 
   Home, 
   Camera, 
   Settings, 
@@ -70,9 +69,7 @@ export const DashboardLayout = ({ children, onSettingsClick }: DashboardLayoutPr
         </button>
         
         <Link to="/" className="flex items-center gap-2 mx-auto">
-          <div className="p-1.5 rounded-lg gradient-hero">
-            <Shield className="h-5 w-5 text-white" />
-          </div>
+          <img src="/safelive-logo.png" alt="SafeLive" className="h-8 w-auto" />
           <span className="font-heading font-bold">SafeLive</span>
         </Link>
 
@@ -102,10 +99,8 @@ export const DashboardLayout = ({ children, onSettingsClick }: DashboardLayoutPr
           {}
           <div className="p-4 flex items-center justify-between border-b border-sidebar-border">
             <Link to="/" className="flex items-center gap-2">
-              <div className="p-2 rounded-xl bg-white/10">
-                <Shield className="h-6 w-6" />
-              </div>
-              <span className="text-xl font-heading font-bold">SafeLive</span>
+              <img src="/safelive-logo.png" alt="SafeLive" className="h-10 w-auto" />
+              <span className="text-lg font-heading font-bold">SafeLive</span>
             </Link>
             <button
               onClick={() => setIsSidebarOpen(false)}
