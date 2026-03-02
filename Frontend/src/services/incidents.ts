@@ -26,6 +26,7 @@ export interface Incident {
   source?: string;
   deviceId?: string;
   officialActionTaken?: boolean;
+  reporterDeleteLocked?: boolean;
   createdAt: string;
   updatedAt?: string;
   hasMessages?: boolean;

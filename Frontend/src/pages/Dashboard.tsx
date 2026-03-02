@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Pencil, Plus, RefreshCw } from 'lucide-react';
+import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { SettingsModal } from '@/components/SettingsModal';
@@ -160,6 +160,7 @@ const Dashboard = () => {
     location: '',
   });
   const [editSaving, setEditSaving] = useState(false);
+  const [deleteSubmittingId, setDeleteSubmittingId] = useState<string | null>(null);
   const [logbookDialogOpen, setLogbookDialogOpen] = useState(false);
   const [logbookLoading, setLogbookLoading] = useState(false);
   const [logbookIncident, setLogbookIncident] = useState<Incident | null>(null);
@@ -245,6 +246,16 @@ const Dashboard = () => {
     return !incident.reporterId || incident.reporterId === currentUser.id;
   }, [currentUser?.id, isLocalUser]);
 
+  const canDeleteIncident = useCallback((incident: Incident) => {
+    if (!isLocalUser) return false;
+    if (!currentUser?.id) return false;
+    if (incident.reporterId && incident.reporterId !== currentUser.id) return false;
+    if (incident.reporterDeleteLocked === true) return false;
+    if (incident.reporterDeleteLocked === false) return true;
+    const status = (incident.status || '').toLowerCase();
+    return !['verified', 'in_progress', 'resolved'].includes(status);
+  }, [currentUser?.id, isLocalUser]);
+
   const handleOpenEditIncident = useCallback((incident: Incident) => {
     if (!canEditIncident(incident)) {
       return;
@@ -318,6 +329,36 @@ const Dashboard = () => {
     }
     setEditSaving(false);
   }, [editForm, editingIncident, refetch, toast]);
+
+  const handleDeleteIncident = useCallback(async (incident: Incident) => {
+    if (!canDeleteIncident(incident)) return;
+    const confirmed = window.confirm('Delete this incident report? This action cannot be undone.');
+    if (!confirmed) return;
+
+    setDeleteSubmittingId(incident.id);
+    const response = await incidentService.deleteIncident(incident.id);
+    if (response.success) {
+      toast({
+        title: 'Incident Deleted',
+        description: 'Your report has been deleted successfully.',
+      });
+      if (selectedId === incident.id) {
+        setSelectedId(null);
+      }
+      if (editingIncident?.id === incident.id) {
+        setEditDialogOpen(false);
+        setEditingIncident(null);
+      }
+      await refetch();
+    } else {
+      toast({
+        title: 'Delete Failed',
+        description: response.error || 'Could not delete incident.',
+        variant: 'destructive',
+      });
+    }
+    setDeleteSubmittingId(null);
+  }, [canDeleteIncident, editingIncident?.id, refetch, selectedId, toast]);
 
   const handleOpenLogbook = async (incident: Incident) => {
     setLogbookIncident(incident);
@@ -655,6 +696,21 @@ const Dashboard = () => {
                               Edit
                             </Button>
                           )}
+                          {canDeleteIncident(incident) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 px-2 gap-1 text-destructive border-destructive/40 hover:bg-destructive/10"
+                              disabled={deleteSubmittingId === incident.id}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleDeleteIncident(incident);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {deleteSubmittingId === incident.id ? 'Deleting...' : 'Delete'}
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"
@@ -707,6 +763,20 @@ const Dashboard = () => {
                     >
                       <Pencil className="h-4 w-4" />
                       Edit Incident
+                    </Button>
+                  )}
+                  {canDeleteIncident(selected) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full gap-2 text-destructive border-destructive/40 hover:bg-destructive/10"
+                      disabled={deleteSubmittingId === selected.id}
+                      onClick={() => {
+                        void handleDeleteIncident(selected);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      {deleteSubmittingId === selected.id ? 'Deleting Incident...' : 'Delete Incident'}
                     </Button>
                   )}
                   <div>
