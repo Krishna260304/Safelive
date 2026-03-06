@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPin, Pencil, Plus, RefreshCw } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { SettingsModal } from '@/components/SettingsModal';
@@ -52,6 +52,7 @@ const incidentCategories = [
   { value: 'safety', label: 'Safety / Security' },
   { value: 'other', label: 'Other' },
 ] as const;
+const LOCAL_EDIT_WINDOW_MS = 5 * 60 * 1000;
 
 const displayIncidentId = (incident: { incidentId?: string; id: string }) => (incident.incidentId || incident.id);
 
@@ -104,24 +105,40 @@ const sanitizeLogbookSummary = (value?: string): string => {
 };
 
 const formatLogbookDate = (value?: string): string => {
-  if (!value) return 'N/A';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata',
+  });
 };
 
 const formatLogbookTime = (value?: string): string => {
-  if (!value) return 'N/A';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return 'N/A';
-  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Kolkata',
+  });
 };
 
 const formatDateTime = (value?: string): string => {
-  if (!value) return 'N/A';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
 };
 
 const toSafeFileToken = (value: string): string => {
@@ -132,6 +149,48 @@ const toSafeFileToken = (value: string): string => {
     .substring(0, 32)
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
+};
+
+const parseApiDate = (value?: string): Date | null => {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatIstDate = (value?: string): string => {
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata',
+  });
+};
+
+const formatIstDateTime = (value?: string): string => {
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
+};
+
+const formatDurationMmSs = (milliseconds: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
 const escapeHtml = (value: string): string =>
@@ -160,13 +219,22 @@ const Dashboard = () => {
     location: '',
   });
   const [editSaving, setEditSaving] = useState(false);
-  const [deleteSubmittingId, setDeleteSubmittingId] = useState<string | null>(null);
   const [logbookDialogOpen, setLogbookDialogOpen] = useState(false);
   const [logbookLoading, setLogbookLoading] = useState(false);
   const [logbookIncident, setLogbookIncident] = useState<Incident | null>(null);
   const [logbookEntries, setLogbookEntries] = useState<IncidentLogEntry[]>([]);
   const [logbookError, setLogbookError] = useState<string | null>(null);
   const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -181,6 +249,18 @@ const Dashboard = () => {
   }, [incidents, query]);
 
   const selected = filtered.find((i) => i.id === selectedId) || filtered[0] || null;
+  const selectedEditWindow = useMemo(() => {
+    if (!isLocalUser || !selected) return null;
+    const createdAtDate = parseApiDate(selected.createdAt);
+    if (!createdAtDate) return null;
+    const expiresAtMs = createdAtDate.getTime() + LOCAL_EDIT_WINDOW_MS;
+    const remainingMs = expiresAtMs - nowMs;
+    return {
+      expiresAtMs,
+      remainingMs,
+      expired: remainingMs <= 0,
+    };
+  }, [isLocalUser, nowMs, selected]);
 
   const stats = useMemo(() => {
     const total = incidents.length;
@@ -212,11 +292,18 @@ const Dashboard = () => {
   const timelineData = useMemo(() => {
     const dates: Record<string, number> = {};
     incidents.forEach((i) => {
-      const date = new Date(i.createdAt).toLocaleDateString();
+      const parsed = parseApiDate(i.createdAt);
+      if (!parsed) return;
+      const date = parsed.toLocaleDateString('en-CA', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        timeZone: 'Asia/Kolkata',
+      });
       dates[date] = (dates[date] || 0) + 1;
     });
     return Object.entries(dates)
-      .sort(([a], [b]) => new Date(a).getTime() - new Date(b).getTime())
+      .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, count]) => ({ date, count }));
   }, [incidents]);
 
@@ -230,6 +317,11 @@ const Dashboard = () => {
 
   const canEditIncident = useCallback((incident: Incident) => {
     if (!isLocalUser) return false;
+    const createdAtMs = parseApiDate(incident.createdAt)?.getTime() ?? Number.NaN;
+    const isEditWindowExpired = Number.isNaN(createdAtMs) || (Date.now() - createdAtMs) > LOCAL_EDIT_WINDOW_MS;
+    if (isEditWindowExpired) {
+      return false;
+    }
     const hasOfficialAction =
       Boolean(incident.officialActionTaken) || Boolean((incident.assignedTo || '').trim());
     if (hasOfficialAction) {
@@ -241,16 +333,6 @@ const Dashboard = () => {
     }
     if (!currentUser?.id) return true;
     return !incident.reporterId || incident.reporterId === currentUser.id;
-  }, [currentUser?.id, isLocalUser]);
-
-  const canDeleteIncident = useCallback((incident: Incident) => {
-    if (!isLocalUser) return false;
-    if (!currentUser?.id) return false;
-    if (incident.reporterId && incident.reporterId !== currentUser.id) return false;
-    if (incident.reporterDeleteLocked === true) return false;
-    if (incident.reporterDeleteLocked === false) return true;
-    const status = (incident.status || '').toLowerCase();
-    return !['verified', 'in_progress', 'resolved'].includes(status);
   }, [currentUser?.id, isLocalUser]);
 
   const handleOpenEditIncident = useCallback((incident: Incident) => {
@@ -326,36 +408,6 @@ const Dashboard = () => {
     }
     setEditSaving(false);
   }, [editForm, editingIncident, refetch, toast]);
-
-  const handleDeleteIncident = useCallback(async (incident: Incident) => {
-    if (!canDeleteIncident(incident)) return;
-    const confirmed = window.confirm('Delete this incident report? This action cannot be undone.');
-    if (!confirmed) return;
-
-    setDeleteSubmittingId(incident.id);
-    const response = await incidentService.deleteIncident(incident.id);
-    if (response.success) {
-      toast({
-        title: 'Incident Deleted',
-        description: 'Your report has been deleted successfully.',
-      });
-      if (selectedId === incident.id) {
-        setSelectedId(null);
-      }
-      if (editingIncident?.id === incident.id) {
-        setEditDialogOpen(false);
-        setEditingIncident(null);
-      }
-      await refetch();
-    } else {
-      toast({
-        title: 'Delete Failed',
-        description: response.error || 'Could not delete incident.',
-        variant: 'destructive',
-      });
-    }
-    setDeleteSubmittingId(null);
-  }, [canDeleteIncident, editingIncident?.id, refetch, selectedId, toast]);
 
   const handleOpenLogbook = async (incident: Incident) => {
     setLogbookIncident(incident);
@@ -668,7 +720,7 @@ const Dashboard = () => {
                           </span>
                           <span className="inline-flex items-center gap-1">
                             <Clock className="h-3.5 w-3.5" />
-                            {new Date(incident.createdAt).toLocaleDateString()}
+                            {formatIstDate(incident.createdAt)}
                           </span>
                         </div>
                       </div>
@@ -686,21 +738,6 @@ const Dashboard = () => {
                             >
                               <Pencil className="h-3.5 w-3.5" />
                               Edit
-                            </Button>
-                          )}
-                          {canDeleteIncident(incident) && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-8 px-2 gap-1 text-destructive border-destructive/40 hover:bg-destructive/10"
-                              disabled={deleteSubmittingId === incident.id}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                void handleDeleteIncident(incident);
-                              }}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              {deleteSubmittingId === incident.id ? 'Deleting...' : 'Delete'}
                             </Button>
                           )}
                           <Button
@@ -757,19 +794,18 @@ const Dashboard = () => {
                       Edit Incident
                     </Button>
                   )}
-                  {canDeleteIncident(selected) && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="w-full gap-2 text-destructive border-destructive/40 hover:bg-destructive/10"
-                      disabled={deleteSubmittingId === selected.id}
-                      onClick={() => {
-                        void handleDeleteIncident(selected);
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      {deleteSubmittingId === selected.id ? 'Deleting Incident...' : 'Delete Incident'}
-                    </Button>
+                  {isLocalUser && (
+                    <div className="text-xs text-muted-foreground space-y-1">
+                      <p>Local users can edit incidents only within 5 minutes of upload.</p>
+                      {selectedEditWindow && (
+                        <p>
+                          {selectedEditWindow.expired
+                            ? 'Edit window expired'
+                            : `Time left: ${formatDurationMmSs(selectedEditWindow.remainingMs)}`} | Expires at{' '}
+                          {formatIstDateTime(new Date(selectedEditWindow.expiresAtMs).toISOString())} IST
+                        </p>
+                      )}
+                    </div>
                   )}
                   <div>
                     <div className="text-xs text-muted-foreground uppercase tracking-wide">Title</div>
@@ -815,10 +851,10 @@ const Dashboard = () => {
                   )}
                   <div className="border-t border-border pt-4">
                     <div className="text-xs text-muted-foreground">
-                      Created: {new Date(selected.createdAt).toLocaleString()}
+                      Created: {formatIstDateTime(selected.createdAt)} IST
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
-                      Updated: {selected.updatedAt ? new Date(selected.updatedAt).toLocaleString() : '-'}
+                      Updated: {selected.updatedAt ? `${formatIstDateTime(selected.updatedAt)} IST` : '-'}
                     </div>
                   </div>
                 </div>

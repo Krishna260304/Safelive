@@ -63,25 +63,50 @@ const toRole = (value: string | undefined): DashboardRole => {
   return 'department';
 };
 
+const parseApiDate = (value?: string): Date | null => {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
 const formatDateTime = (value?: string) => {
-  if (!value) return 'N/A';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
 };
 
 const formatLogbookDate = (value?: string) => {
-  if (!value) return 'N/A';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata',
+  });
 };
 
 const formatLogbookTime = (value?: string) => {
-  if (!value) return 'N/A';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return 'N/A';
-  return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Kolkata',
+  });
 };
 
 const formatActionLabel = (value?: string) => {
@@ -108,16 +133,24 @@ const formatStatus = (value?: string) => {
   return text.toUpperCase();
 };
 
-const FIELD_INSPECTOR_EDIT_WINDOW_MS = 10 * 60 * 1000;
+const FIELD_INSPECTOR_EDIT_WINDOW_MS = 2 * 60 * 1000;
 
 const parseIsoMillis = (value?: string): number | null => {
   if (!value) return null;
-  const parsed = new Date(value);
+  const raw = value.trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const parsed = new Date(normalized);
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed.getTime();
 };
 
-const getFieldInspectorEditWindowMsLeft = (ticket: Ticket, currentUserId: string): number => {
+const getFieldInspectorEditWindowMsLeft = (
+  ticket: Ticket,
+  currentUserId: string,
+  nowMs: number = Date.now(),
+): number => {
   const inspectorId = (ticket.fieldInspectorId || '').trim();
   if (!currentUserId) {
     return -1;
@@ -129,11 +162,22 @@ const getFieldInspectorEditWindowMsLeft = (ticket: Ticket, currentUserId: string
   if (lastUpdateMs === null) {
     return -1;
   }
-  return 1;
+  const expiresAtMs = lastUpdateMs + FIELD_INSPECTOR_EDIT_WINDOW_MS;
+  return expiresAtMs - nowMs;
 };
 
-const isFieldInspectorEditWindowActive = (ticket: Ticket, currentUserId: string): boolean =>
-  getFieldInspectorEditWindowMsLeft(ticket, currentUserId) >= 0;
+const isFieldInspectorEditWindowActive = (
+  ticket: Ticket,
+  currentUserId: string,
+  nowMs: number = Date.now(),
+): boolean => getFieldInspectorEditWindowMsLeft(ticket, currentUserId, nowMs) >= 0;
+
+const formatMinutesSeconds = (milliseconds: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
 
 const isFieldInspectorUpdateLocked = (ticket?: Ticket | null): boolean => {
   if (!ticket) return false;
@@ -393,11 +437,11 @@ const OfficialDashboard = () => {
   const [logbookTicket, setLogbookTicket] = useState<Ticket | null>(null);
   const [logbookEntries, setLogbookEntries] = useState<TicketLogEntry[]>([]);
   const [logbookError, setLogbookError] = useState<string | null>(null);
-  const [deletingLogEntryId, setDeletingLogEntryId] = useState<string | null>(null);
   const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
   const [ticketDetailsDialogOpen, setTicketDetailsDialogOpen] = useState(false);
   const [ticketDetailsLoading, setTicketDetailsLoading] = useState(false);
   const [ticketDetails, setTicketDetails] = useState<Ticket | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
     if (!isTicketsPage || (role !== 'supervisor' && role !== 'department')) {
@@ -446,6 +490,13 @@ const OfficialDashboard = () => {
     void loadSupervisors();
   }, [role, isTicketsPage, toast]);
 
+  useEffect(() => {
+    const timerId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timerId);
+  }, []);
+
   const filteredTickets = useMemo(() => {
     const term = query.trim().toLowerCase();
     if (!term) return tickets;
@@ -478,27 +529,12 @@ const OfficialDashboard = () => {
     return { total, open, inProgress, resolved };
   }, [tickets]);
 
-  const latestDeletableLogId = useMemo(() => {
-    if (role !== 'field_inspector' || !currentUserId) return '';
-    if (isFieldInspectorUpdateLocked(logbookTicket)) return '';
-    const latestEntry = logbookEntries[0];
-    if (!latestEntry) return '';
-    const isOwnedByInspector =
-      (latestEntry.actorUserId || '').trim() === currentUserId &&
-      (latestEntry.actorOfficialRole || '').trim() === 'field_inspector' &&
-      ['field_inspector_progress_update', 'field_inspector_progress_update_edited'].includes((latestEntry.action || '').trim());
-    return isOwnedByInspector ? latestEntry.id : '';
-  }, [currentUserId, logbookEntries, logbookTicket, role]);
-
   const logbookRows = useMemo(() => {
     return logbookEntries.map((entry) => {
       const details = formatLogbookDetails(entry);
       const actorName = (entry.actorName || 'System').trim();
       const roleName = (entry.actorOfficialRole || '').trim();
       const actor = roleName ? `${actorName} (${roleName})` : actorName;
-      const canDelete =
-        role === 'field_inspector' &&
-        entry.id === latestDeletableLogId;
       return {
         id: entry.id,
         location: resolveLogbookLocation(entry, logbookTicket),
@@ -506,10 +542,9 @@ const OfficialDashboard = () => {
         actor,
         date: formatLogbookDate(entry.createdAt),
         time: formatLogbookTime(entry.createdAt),
-        canDelete,
       };
     });
-  }, [logbookEntries, logbookTicket, latestDeletableLogId, role]);
+  }, [logbookEntries, logbookTicket]);
 
   const downloadBlob = useCallback((filename: string, mime: string, content: string) => {
     const blob = new Blob([content], { type: mime });
@@ -784,9 +819,17 @@ const OfficialDashboard = () => {
       });
       return;
     }
+    if (!isFieldInspectorEditWindowActive(ticket, currentUserId, Date.now())) {
+      toast({
+        title: 'Edit Window Expired',
+        description: 'Last update can only be edited within 2 minutes of upload.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setProgressDrafts((prev) => ({ ...prev, [ticket.id]: ticket.progressSummary || '' }));
     setEditingProgressByTicket((prev) => ({ ...prev, [ticket.id]: true }));
-  }, [toast]);
+  }, [currentUserId, toast]);
 
   const handleCancelEditProgress = useCallback((ticketId: string) => {
     setEditingProgressByTicket((prev) => {
@@ -817,6 +860,14 @@ const OfficialDashboard = () => {
       toast({
         title: 'Edit Locked',
         description: 'Last update cannot be edited after department/supervisor verification.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (isEditing && ticket && !isFieldInspectorEditWindowActive(ticket, currentUserId, Date.now())) {
+      toast({
+        title: 'Edit Window Expired',
+        description: 'Last update can only be edited within 2 minutes of upload.',
         variant: 'destructive',
       });
       return;
@@ -859,40 +910,6 @@ const OfficialDashboard = () => {
       });
     } finally {
       setProgressSubmittingId(null);
-    }
-  };
-
-  const handleDeleteLogbookEntry = async (entryId: string) => {
-    if (!logbookTicket) return;
-    if (isFieldInspectorUpdateLocked(logbookTicket)) {
-      toast({
-        title: 'Delete Locked',
-        description: 'Last update cannot be deleted after department/supervisor verification.',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (!window.confirm('Delete this log entry? This action cannot be undone.')) return;
-
-    setDeletingLogEntryId(entryId);
-    try {
-      const response = await ticketService.deleteLogbookEntry(logbookTicket.id, entryId);
-      if (!response.success) {
-        toast({
-          title: 'Delete Failed',
-          description: response.error || 'Could not delete this log entry.',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      setLogbookEntries((prev) => prev.filter((entry) => entry.id !== entryId));
-      toast({
-        title: 'Log Deleted',
-        description: 'Selected logbook entry has been removed.',
-      });
-    } finally {
-      setDeletingLogEntryId(null);
     }
   };
 
@@ -1074,10 +1091,8 @@ const OfficialDashboard = () => {
               const isVerified = ticket.status === 'verified';
               const inspectorEditLocked = isFieldInspectorUpdateLocked(ticket);
               const inspectorEditWindowMsLeft =
-                role === 'field_inspector' ? getFieldInspectorEditWindowMsLeft(ticket, currentUserId) : -1;
+                role === 'field_inspector' ? getFieldInspectorEditWindowMsLeft(ticket, currentUserId, nowMs) : -1;
               const inspectorEditWindowActive = inspectorEditWindowMsLeft >= 0;
-              const inspectorEditMinutesLeft =
-                inspectorEditWindowActive ? Math.max(1, Math.ceil(inspectorEditWindowMsLeft / 60000)) : 0;
               const canVerifyStep = !isResolved && !isVerified;
               const canAssignWorkersStep = !isResolved && isVerified && !hasAssignedWorker;
               const canResolveStep = !isResolved && isVerified && hasAssignedWorker;
@@ -1341,8 +1356,15 @@ const OfficialDashboard = () => {
                                         <Pencil className="h-3.5 w-3.5 mr-1" />
                                         Edit last update
                                       </Button>
-                                      <span className="text-muted-foreground">You can edit this update anytime</span>
+                                      <span className="text-muted-foreground">
+                                        Edit allowed for 2 minutes after upload ({formatMinutesSeconds(inspectorEditWindowMsLeft)} left)
+                                      </span>
                                     </>
+                                  )}
+                                  {!inspectorEditLocked && !inspectorEditWindowActive && (
+                                    <span className="text-muted-foreground">
+                                      Edit window expired (2 minutes from upload)
+                                    </span>
                                   )}
                                   {inspectorEditLocked && (
                                     <span className="text-muted-foreground">
@@ -1487,16 +1509,6 @@ const OfficialDashboard = () => {
                       <td className="border border-[#c2cbd6] px-3 py-2 align-top">
                         <div className="text-[#2f3b49]">{row.details}</div>
                         <div className="mt-1 text-[13px] text-[#66788d]">{row.actor}</div>
-                        {row.canDelete && (
-                          <button
-                            type="button"
-                            className="mt-2 text-xs font-medium text-destructive hover:underline disabled:opacity-60"
-                            disabled={deletingLogEntryId === row.id}
-                            onClick={() => void handleDeleteLogbookEntry(row.id)}
-                          >
-                            {deletingLogEntryId === row.id ? 'Deleting...' : 'Delete this log'}
-                          </button>
-                        )}
                       </td>
                       <td className="border border-[#c2cbd6] px-3 py-2 align-top whitespace-nowrap">{row.date}</td>
                       <td className="border border-[#c2cbd6] px-3 py-2 align-top whitespace-nowrap">{row.time}</td>

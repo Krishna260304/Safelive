@@ -24,13 +24,35 @@ const displayAlertId = (alert: { incidentId?: string; ticketId?: string; id: str
   return 'N/A';
 };
 
+const parseApiDate = (value?: string): Date | null => {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const toApiMillis = (value?: string): number => parseApiDate(value)?.getTime() ?? 0;
+
+const formatIstTime = (value?: string): string => {
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
+};
+
 export default function OfficialAlerts() {
   const { incidents, loading } = useIncidents();
   const [filter, setFilter] = useState<'all' | 'critical' | 'recent'>('all');
 
   const activeAlerts = useMemo(() => {
     let sorted = [...incidents].sort((a, b) => 
-      new Date(b.createdAt || '').getTime() - new Date(a.createdAt || '').getTime()
+      toApiMillis(b.createdAt) - toApiMillis(a.createdAt)
     );
 
     if (filter === 'critical') {
@@ -129,7 +151,7 @@ export default function OfficialAlerts() {
                         <span className="text-[10px] text-muted-foreground">ID: {displayAlertId(alert)}</span>
                       </div>
                       <span className="text-xs text-muted-foreground whitespace-nowrap ml-2">
-                        {new Date(alert.createdAt || '').toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                        {formatIstTime(alert.createdAt)}
                       </span>
                     </div>
                     

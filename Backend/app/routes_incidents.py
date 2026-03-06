@@ -58,6 +58,7 @@ IOT_PRIORITY_BY_SEVERITY = {
     "high": "high",
 }
 OFFICIAL_ACTIVITY_ROLES = {"department", "supervisor", "field_inspector", "worker"}
+LOCAL_REPORTER_EDIT_WINDOW_MINUTES = 5
 
 def _now_iso():
     return datetime.utcnow().isoformat()
@@ -201,7 +202,17 @@ def _has_official_logbook_action(doc: dict) -> bool:
     )
     return bool(row)
 
+def _reporter_edit_window_expired(doc: dict, now: datetime | None = None) -> bool:
+    created_at = _parse_iso_datetime(doc.get("createdAt"))
+    if not created_at:
+        return True
+    current_time = now or datetime.utcnow()
+    window_end = created_at + timedelta(minutes=LOCAL_REPORTER_EDIT_WINDOW_MINUTES)
+    return current_time > window_end
+
 def _reporter_edit_locked(doc: dict) -> bool:
+    if _reporter_edit_window_expired(doc):
+        return True
     if bool(doc.get("officialActionTaken")):
         return True
     if _has_official_logbook_action(doc):
@@ -1109,6 +1120,11 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
     if not is_official_user:
         if not _can_access_incident(existing_doc, current_user):
             raise HTTPException(status_code=403, detail="Access denied")
+        if _reporter_edit_window_expired(existing_doc):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Local users can only edit incidents within {LOCAL_REPORTER_EDIT_WINDOW_MINUTES} minutes of upload",
+            )
         if _reporter_edit_locked(existing_doc):
             raise HTTPException(status_code=403, detail="Incident can no longer be edited after verification")
         allowed_fields = {"title", "description", "category", "location", "latitude", "longitude", "images"}

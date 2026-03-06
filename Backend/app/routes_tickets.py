@@ -20,7 +20,7 @@ ROLE_SUPERVISOR = "supervisor"
 ROLE_FIELD_INSPECTOR = "field_inspector"
 ROLE_WORKER = "worker"
 TICKET_STATUSES = {"open", "pending", "in_progress", "verified", "resolved"}
-FIELD_INSPECTOR_EDIT_WINDOW_MINUTES = 10
+FIELD_INSPECTOR_EDIT_WINDOW_MINUTES = 2
 FIELD_INSPECTOR_VISIBLE_STATUSES = {"open", "pending", "verified", "in_progress", "resolved"}
 FIELD_INSPECTOR_EDITABLE_STATUSES = {"open", "pending", "verified", "in_progress"}
 FIELD_INSPECTOR_NOTE_PREFIXES = (
@@ -1136,6 +1136,11 @@ def update_ticket_progress(
                 detail="Only the original field inspector can edit this update",
             )
         editable_reference = _resolve_field_inspector_last_update_at(existing, current_user_id)
+        if not editable_reference or not _field_inspector_edit_window_active(editable_reference):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Field inspector updates can only be edited within {FIELD_INSPECTOR_EDIT_WINDOW_MINUTES} minutes of upload",
+            )
         editable_log_entry = _latest_editable_field_inspector_log(ticket_id, current_user_id)
         if editable_log_entry is None:
             raise HTTPException(

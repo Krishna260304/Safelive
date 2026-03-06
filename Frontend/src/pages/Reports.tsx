@@ -42,6 +42,30 @@ const PRIORITY_FILTER_OPTIONS: NonNullable<Incident['priority']>[] = ['critical'
 
 const displayIncidentId = (incident: Incident) => incident.incidentId || incident.id;
 
+const parseApiDate = (value?: string): Date | null => {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(raw);
+  const normalized = hasTimezone ? raw : `${raw}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatIstDateTime = (value?: string): string => {
+  const parsed = parseApiDate(value);
+  if (!parsed) return 'N/A';
+  return parsed.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata',
+  });
+};
+
 export default function Reports() {
   const [reports, setReports] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
@@ -286,7 +310,7 @@ export default function Reports() {
                       </TableCell>
                       <TableCell>{incident.location || 'N/A'}</TableCell>
                       <TableCell>
-                        {incident.createdAt ? new Date(incident.createdAt).toLocaleString() : 'N/A'}
+                        {formatIstDateTime(incident.createdAt)}
                       </TableCell>
                     </TableRow>
                   ))}
