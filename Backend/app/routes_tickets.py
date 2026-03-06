@@ -706,19 +706,21 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
 
     existing_status = (existing.get("status") or "").strip().lower()
     is_reopened_case = _is_reopened_case(existing)
+    reopened_supervisor_id = _reopened_supervisor_id(existing)
     was_resolved = existing_status == "resolved"
     reopening = normalized_status == "open" and was_resolved
 
-    if (
-        is_reopened_case
-        and role == ROLE_DEPARTMENT
-        and normalized_status in {"verified", "resolved"}
-        and not _reopened_supervisor_id(existing)
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Assign a supervisor first for reopened tickets before verification or resolution",
-        )
+    if is_reopened_case and normalized_status in {"verified", "resolved"}:
+        if not reopened_supervisor_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Assign a supervisor first for reopened tickets before verification or resolution",
+            )
+        if role == ROLE_DEPARTMENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the assigned supervisor can verify or resolve reopened tickets",
+            )
 
     if normalized_status == "resolved":
         if role not in {ROLE_DEPARTMENT, ROLE_SUPERVISOR}:
@@ -975,11 +977,18 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
         raise HTTPException(status_code=400, detail="Workers are already assigned for this ticket")
 
     is_reopened_case = _is_reopened_case(existing)
-    if is_reopened_case and role == ROLE_DEPARTMENT and not _reopened_supervisor_id(existing):
-        raise HTTPException(
-            status_code=400,
-            detail="Assign a supervisor first for reopened tickets before worker assignment",
-        )
+    reopened_supervisor_id = _reopened_supervisor_id(existing)
+    if is_reopened_case:
+        if not reopened_supervisor_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Assign a supervisor first for reopened tickets before worker assignment",
+            )
+        if role == ROLE_DEPARTMENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the assigned supervisor can assign workers for reopened tickets",
+            )
 
     assignment_worker_ids = _normalize_assignment_worker_ids(payload)
     if not assignment_worker_ids:
