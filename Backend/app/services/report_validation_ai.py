@@ -77,15 +77,15 @@ def _normalize_image_payload(payload: str | None) -> str:
 
 
 def _has_known_image_signature(raw: bytes) -> bool:
-    if raw.startswith(b"\xff\xd8\xff"):  # JPEG
+    if raw.startswith(b"\xff\xd8\xff"): 
         return True
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):  # PNG
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
         return True
-    if raw.startswith((b"GIF87a", b"GIF89a")):  # GIF
+    if raw.startswith((b"GIF87a", b"GIF89a")):  
         return True
-    if raw.startswith(b"RIFF") and b"WEBP" in raw[:16]:  # WEBP
+    if raw.startswith(b"RIFF") and b"WEBP" in raw[:16]:
         return True
-    if raw.startswith((b"BM", b"II*\x00", b"MM\x00*")):  # BMP/TIFF
+    if raw.startswith((b"BM", b"II*\x00", b"MM\x00*")):  
         return True
     return False
 
