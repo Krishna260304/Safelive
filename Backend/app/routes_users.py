@@ -16,14 +16,12 @@ DEPARTMENT_MANAGED_ROLES = {"supervisor", "field_inspector"}
 DEFAULT_DEPARTMENT_FALLBACK = settings.DEFAULT_DEPARTMENT_NAME
 WORKER_CODE_PATTERN = re.compile(r"^\d{6}$")
 
-
 def _generate_worker_code() -> str:
     for _ in range(200):
         code = f"{secrets.randbelow(900000) + 100000:06d}"
         if not users.find_one({"workerCode": code}, {"_id": 1}):
             return code
     raise HTTPException(status_code=500, detail="Unable to generate worker code right now")
-
 
 def _ensure_worker_code(worker_doc: dict) -> str:
     existing = str(worker_doc.get("workerCode") or "").strip()
@@ -36,7 +34,6 @@ def _ensure_worker_code(worker_doc: dict) -> str:
         {"$set": {"workerCode": generated, "updatedAt": datetime.utcnow().isoformat()}},
     )
     return generated
-
 
 def _validate_optional_pincode(value: str | None) -> str | None:
     text = str(value or "").strip()
@@ -76,7 +73,6 @@ def update_profile(payload: UserUpdate, current_user: dict = Depends(get_current
         data.pop("password", None)
     return {"success": True, "data": data}
 
-
 @router.get("/workers")
 def list_workers(current_user: dict = Depends(require_official_roles("department", "supervisor"))):
     rows = list(
@@ -101,7 +97,6 @@ def list_workers(current_user: dict = Depends(require_official_roles("department
             }
         )
     return {"success": True, "data": data}
-
 
 @router.get("/managed-officials")
 def list_managed_officials(current_user: dict = Depends(require_official_roles("department"))):
@@ -143,7 +138,6 @@ def list_managed_officials(current_user: dict = Depends(require_official_roles("
             }
         )
     return {"success": True, "data": data}
-
 
 @router.post("/managed-officials")
 def create_managed_official(

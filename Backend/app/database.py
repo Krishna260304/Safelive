@@ -31,7 +31,6 @@ PUBLIC_INCIDENT_ID_PATTERN = re.compile(r"^(\d{4})(\d{4})$")
 
 atexit.register(client.close)
 
-
 def ensure_db_connection(max_retries: int = 3, retry_delay_seconds: float = 1.5):
     last_error: Exception | None = None
     retries = max(int(max_retries), 1)
@@ -71,7 +70,6 @@ def cleanup_orphan_tickets():
     if orphan_ticket_ids:
         tickets.delete_many({"_id": {"$in": orphan_ticket_ids}})
 
-
 def _parse_created_at(value) -> datetime | None:
     if isinstance(value, datetime):
         if value.tzinfo:
@@ -91,19 +89,15 @@ def _parse_created_at(value) -> datetime | None:
         return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
 
-
 def _ticket_month_key(created_at) -> str:
     parsed = _parse_created_at(created_at) or datetime.utcnow()
     return parsed.strftime("%y%m")
 
-
 def _public_ticket_id(month_key: str, serial: int) -> str:
     return f"{month_key}{serial:04d}"
 
-
 def _public_incident_id(month_key: str, serial: int) -> str:
     return f"{month_key}{serial:04d}"
-
 
 def _parse_public_ticket_id(value: str | None) -> tuple[str, int] | None:
     raw = str(value or "").strip()
@@ -118,7 +112,6 @@ def _parse_public_ticket_id(value: str | None) -> tuple[str, int] | None:
         return None
     return match.group(1), serial
 
-
 def _parse_public_incident_id(value: str | None) -> tuple[str, int] | None:
     raw = str(value or "").strip()
     match = PUBLIC_INCIDENT_ID_PATTERN.match(raw)
@@ -131,7 +124,6 @@ def _parse_public_incident_id(value: str | None) -> tuple[str, int] | None:
     if serial <= 0:
         return None
     return match.group(1), serial
-
 
 def backfill_public_incident_ids():
     rows = list(incidents.find({}, {"_id": 1, "incidentId": 1, "createdAt": 1}).sort([("createdAt", 1), ("_id", 1)]))
@@ -172,7 +164,6 @@ def backfill_public_incident_ids():
             {"$max": {"seq": int(serial)}},
             upsert=True,
         )
-
 
 def backfill_public_ticket_ids():
     rows = list(tickets.find({}, {"_id": 1, "ticketId": 1, "createdAt": 1, "incidentId": 1}).sort([("createdAt", 1), ("_id", 1)]))
@@ -220,7 +211,6 @@ def backfill_public_ticket_ids():
             {"$max": {"seq": int(serial)}},
             upsert=True,
         )
-
 
 def init_db():
     from pymongo.errors import OperationFailure

@@ -28,10 +28,8 @@ FIELD_INSPECTOR_NOTE_PREFIXES = (
     "field inspector progress update",
 )
 
-
 def _now_iso():
     return datetime.utcnow().isoformat()
-
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
     raw = str(value or "").strip()
@@ -46,7 +44,6 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
 
-
 def _field_inspector_edit_window_active(last_update_at: str | None, now: datetime | None = None) -> bool:
     parsed = _parse_iso_datetime(last_update_at)
     if not parsed:
@@ -55,13 +52,11 @@ def _field_inspector_edit_window_active(last_update_at: str | None, now: datetim
     elapsed = reference - parsed
     return timedelta(0) <= elapsed <= timedelta(minutes=FIELD_INSPECTOR_EDIT_WINDOW_MINUTES)
 
-
 def _current_official_role(current_user: dict) -> str:
     role = normalize_official_role(current_user.get("officialRole"))
     if not role:
         raise HTTPException(status_code=403, detail="Official role is required")
     return role
-
 
 def _ensure_roles(current_user: dict, *roles: str) -> str:
     role = _current_official_role(current_user)
@@ -69,7 +64,6 @@ def _ensure_roles(current_user: dict, *roles: str) -> str:
     if role not in allowed:
         raise HTTPException(status_code=403, detail="Insufficient role permissions")
     return role
-
 
 def _merge_queries(base: dict | None, extra: dict | None) -> dict:
     base = base or {}
@@ -79,7 +73,6 @@ def _merge_queries(base: dict | None, extra: dict | None) -> dict:
     if not extra:
         return dict(base)
     return {"$and": [base, extra]}
-
 
 def _ticket_scope_query(current_user: dict) -> dict:
     role = _current_official_role(current_user)
@@ -114,7 +107,6 @@ def _ticket_scope_query(current_user: dict) -> dict:
         )
     return {}
 
-
 def _get_ticket_doc(ticket_id: str):
     try:
         obj_id = to_object_id(ticket_id)
@@ -124,7 +116,6 @@ def _get_ticket_doc(ticket_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="Ticket not found")
     return doc
-
 
 def _can_access_ticket(doc: dict, current_user: dict) -> bool:
     role = _current_official_role(current_user)
@@ -143,7 +134,6 @@ def _can_access_ticket(doc: dict, current_user: dict) -> bool:
             return True
         return bool(user_id and field_inspector_id == user_id)
     return False
-
 
 def _is_ticket_reporter(doc: dict, current_user: dict) -> bool:
     user_id = str(current_user.get("id") or "").strip()
@@ -165,13 +155,11 @@ def _is_ticket_reporter(doc: dict, current_user: dict) -> bool:
 
     return str((incident_doc or {}).get("reporterId") or "").strip() == user_id
 
-
 def _is_field_inspector_note_text(value: str | None) -> bool:
     text = str(value or "").strip().lower()
     if not text:
         return False
     return any(text.startswith(prefix) for prefix in FIELD_INSPECTOR_NOTE_PREFIXES)
-
 
 def _latest_inspector_note(notes: list[dict] | None, user_id: str | None = None) -> dict | None:
     if not isinstance(notes, list):
@@ -188,7 +176,6 @@ def _latest_inspector_note(notes: list[dict] | None, user_id: str | None = None)
         return note
     return None
 
-
 def _resolve_field_inspector_last_update_at(doc: dict, user_id: str | None = None) -> str | None:
     if not isinstance(doc, dict):
         return None
@@ -204,8 +191,6 @@ def _resolve_field_inspector_last_update_at(doc: dict, user_id: str | None = Non
             value = str(latest_note.get(key) or "").strip()
             if value and _parse_iso_datetime(value):
                 return value
-
-    # Legacy fallback: if inspector ownership is clear, use progressUpdatedAt.
     progress_updated_at = str(doc.get("progressUpdatedAt") or "").strip()
     if progress_updated_at and _parse_iso_datetime(progress_updated_at):
         current_user_id = str(user_id or "").strip()
@@ -215,13 +200,11 @@ def _resolve_field_inspector_last_update_at(doc: dict, user_id: str | None = Non
 
     return None
 
-
 def _reopened_timestamp(doc: dict) -> datetime | None:
     reopened_by = doc.get("reopenedBy")
     if isinstance(reopened_by, dict):
         return _parse_iso_datetime(str(reopened_by.get("timestamp") or "").strip())
     return None
-
 
 def _collect_recent_progress_notes(doc: dict, limit: int = 8) -> list[str]:
     notes = doc.get("notes")
@@ -250,7 +233,6 @@ def _collect_recent_progress_notes(doc: dict, limit: int = 8) -> list[str]:
         return []
     return collected[-limit:]
 
-
 def _can_access_ticket_logbook(doc: dict, current_user: dict) -> bool:
     if is_official_account(current_user):
         role = normalize_official_role(current_user.get("officialRole"))
@@ -259,11 +241,9 @@ def _can_access_ticket_logbook(doc: dict, current_user: dict) -> bool:
         if role == ROLE_DEPARTMENT:
             return True
         if role == ROLE_FIELD_INSPECTOR:
-            # Field inspectors can access logbooks for ALL tickets
             return True
         return _can_access_ticket(doc, current_user)
     return _is_ticket_reporter(doc, current_user)
-
 
 def _has_worker_assignment(doc: dict) -> bool:
     assignee_user_id = str(doc.get("assigneeUserId") or "").strip()
@@ -281,10 +261,8 @@ def _has_worker_assignment(doc: dict) -> bool:
 
     return False
 
-
 def _is_verified_ticket(doc: dict) -> bool:
     return (doc.get("status") or "").strip().lower() == "verified"
-
 
 def _field_inspector_update_locked(doc: dict) -> bool:
     if not isinstance(doc, dict):
@@ -297,10 +275,8 @@ def _field_inspector_update_locked(doc: dict) -> bool:
         return False
     return updates_verified_at >= latest_update_at
 
-
 def _reopened_supervisor_id(doc: dict) -> str:
     return str(doc.get("reopenedSupervisorId") or "").strip()
-
 
 def _supervisor_can_handle_ticket(doc: dict, supervisor_user_id: str | None) -> bool:
     current_user_id = str(supervisor_user_id or "").strip()
@@ -313,16 +289,13 @@ def _supervisor_can_handle_ticket(doc: dict, supervisor_user_id: str | None) -> 
         return False
     return assigned_supervisor_id == current_user_id
 
-
 def _is_field_inspector_ticket_visible(doc: dict) -> bool:
     status = (doc.get("status") or "").strip().lower()
     return status in FIELD_INSPECTOR_VISIBLE_STATUSES
 
-
 def _is_field_inspector_ticket_eligible(doc: dict) -> bool:
     status = (doc.get("status") or "").strip().lower()
     return status in FIELD_INSPECTOR_EDITABLE_STATUSES
-
 
 def _resolve_ticket_reporter_email(doc: dict) -> str | None:
     direct_email = (doc.get("reporterEmail") or "").strip()
@@ -364,7 +337,6 @@ def _resolve_ticket_reporter_email(doc: dict) -> str | None:
 
     return None
 
-
 def _notify_ticket_update(doc: dict):
     message = f"SafeLive ticket update: {doc.get('title', 'Ticket')} is now {doc.get('status', 'updated')}."
     if doc.get("reporterPhone"):
@@ -393,13 +365,11 @@ def _notify_ticket_update(doc: dict):
     elif status_value == "resolved":
         LOGGER.warning("Resolved email skipped: reporter email unavailable for ticket %s", doc.get("_id"))
 
-
 def _normalize_ticket_status(value: str) -> str:
     status = (value or "").strip().lower()
     if status in {"pending_review", "under_review"}:
         return "pending"
     return status
-
 
 def _is_reopened_case(doc: dict) -> bool:
     reopened_by = doc.get("reopenedBy")
@@ -415,7 +385,6 @@ def _is_reopened_case(doc: dict) -> bool:
         return True
     return False
 
-
 def _incident_selector_from_ticket(doc: dict) -> dict | None:
     incident_id = (doc.get("incidentId") or "").strip()
     if not incident_id:
@@ -425,16 +394,13 @@ def _incident_selector_from_ticket(doc: dict) -> dict | None:
     except Exception:
         return {"_id": incident_id}
 
-
 def _sync_incident_from_ticket(doc: dict, updates: dict):
     selector = _incident_selector_from_ticket(doc)
     if not selector or not updates:
         return
     next_updates = dict(updates)
-    # Any ticket-side mutation is an official workflow action for this incident.
     next_updates["officialActionTaken"] = True
     incidents.update_one(selector, {"$set": next_updates})
-
 
 def _record_ticket_log(action: str, ticket_doc: dict, actor: dict, details: dict | None = None):
     append_incident_log(
@@ -445,14 +411,12 @@ def _record_ticket_log(action: str, ticket_doc: dict, actor: dict, details: dict
         details=details or {},
     )
 
-
 def _build_note_payload(note_text: str, current_user: dict):
     return {
         "note": note_text,
         "createdAt": _now_iso(),
         "by": current_user.get("id"),
     }
-
 
 def _update_latest_inspector_note(
     notes: list[dict] | None,
@@ -478,7 +442,6 @@ def _update_latest_inspector_note(
         return updated
     return None
 
-
 def _is_deletable_field_inspector_log(entry: dict, user_id: str) -> bool:
     if not isinstance(entry, dict) or not user_id:
         return False
@@ -491,7 +454,6 @@ def _is_deletable_field_inspector_log(entry: dict, user_id: str) -> bool:
     actor_user_id = str(entry.get("actorUserId") or "").strip()
     return actor_user_id == user_id
 
-
 def _ticket_id_selectors(ticket_id: str) -> list[object]:
     selectors: list[object] = [ticket_id]
     try:
@@ -500,11 +462,9 @@ def _ticket_id_selectors(ticket_id: str) -> list[object]:
         pass
     return selectors
 
-
 def _latest_ticket_log_entry(ticket_id: str) -> dict | None:
     selectors = _ticket_id_selectors(ticket_id)
     return incident_logs.find_one({"ticketId": {"$in": selectors}}, sort=[("createdAt", -1)])
-
 
 def _latest_editable_field_inspector_log(ticket_id: str, user_id: str) -> dict | None:
     latest_entry = _latest_ticket_log_entry(ticket_id)
@@ -513,7 +473,6 @@ def _latest_editable_field_inspector_log(ticket_id: str, user_id: str) -> dict |
     if not _is_deletable_field_inspector_log(latest_entry, user_id):
         return None
     return latest_entry
-
 
 def _extract_worker_ids_from_ticket(doc: dict) -> list[str]:
     ordered: list[str] = []
@@ -542,13 +501,11 @@ def _extract_worker_ids_from_ticket(doc: dict) -> list[str]:
 
     return ordered
 
-
 def _is_worker_assigned(doc: dict, worker_user_id: str) -> bool:
     candidate = str(worker_user_id or "").strip()
     if not candidate:
         return False
     return candidate in set(_extract_worker_ids_from_ticket(doc))
-
 
 def _normalize_assignment_worker_ids(payload: TicketAssign) -> list[str]:
     ordered: list[str] = []
@@ -568,7 +525,6 @@ def _normalize_assignment_worker_ids(payload: TicketAssign) -> list[str]:
 
     return ordered
 
-
 def _find_worker_doc(worker_id: str | None):
     candidate = (worker_id or "").strip()
     if not candidate:
@@ -586,7 +542,6 @@ def _find_worker_doc(worker_id: str | None):
         return None
     return doc
 
-
 def _find_supervisor_doc(supervisor_id: str | None):
     candidate = (supervisor_id or "").strip()
     if not candidate:
@@ -603,7 +558,6 @@ def _find_supervisor_doc(supervisor_id: str | None):
     if normalize_official_role(doc.get("officialRole")) != ROLE_SUPERVISOR:
         return None
     return doc
-
 
 def _notify_ticket_reopened(
     doc: dict,
@@ -688,7 +642,6 @@ def _notify_ticket_reopened(
     except Exception as exc:
         LOGGER.warning("Ticket %s warning persistence failed: %s", doc.get("_id"), exc)
 
-
 @router.get("/stats")
 def get_stats(current_user: dict = Depends(get_official_user)):
     scope = _ticket_scope_query(current_user)
@@ -716,7 +669,6 @@ def get_stats(current_user: dict = Depends(get_official_user)):
         },
     }
 
-
 @router.get("")
 def get_tickets(
     status: str | None = None,
@@ -734,14 +686,12 @@ def get_tickets(
     data = list(tickets.find(query).sort("createdAt", -1))
     return {"success": True, "data": serialize_list(data)}
 
-
 @router.get("/{ticket_id}")
 def get_ticket(ticket_id: str, current_user: dict = Depends(get_official_user)):
     doc = _get_ticket_doc(ticket_id)
     if not _can_access_ticket(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     return {"success": True, "data": serialize_doc(doc)}
-
 
 @router.patch("/{ticket_id}/status")
 def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dict = Depends(get_official_user)):
@@ -796,7 +746,6 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
             "name": current_user.get("name") or current_user.get("email"),
             "timestamp": now,
         }
-        # Restart progress lifecycle when a resolved case is reopened.
         update["progressSummary"] = ""
         update["progressPercent"] = MIN_PROGRESS_PERCENT
         update["progressSource"] = "reopened_reset_min"
@@ -805,7 +754,6 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["lastInspectorUpdateAt"] = ""
         update["lastWorkerUpdateAt"] = ""
         update["inspectorReminderSentForDate"] = ""
-        # Clear current worker assignments - supervisor must reassign after reopening
         update["workerId"] = ""
         update["workerCode"] = ""
         update["workerIds"] = []
@@ -825,7 +773,6 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["reopenedSupervisorName"] = ""
         update["reopenedSupervisorEmail"] = ""
         update["reopenedSupervisorAssignedAt"] = ""
-        # Preserve historical resolver information for audit trail
         update["reopenedFromResolverId"] = str(existing.get("resolvedById") or "").strip()
         update["reopenedFromResolverName"] = str(existing.get("resolvedByName") or "").strip()
         update["reopenedFromResolverRole"] = str(existing.get("resolvedByRole") or "").strip()
@@ -937,7 +884,6 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
 
     return {"success": True, "data": serialize_doc(doc)}
 
-
 @router.post("/{ticket_id}/assign-supervisor")
 def assign_reopened_supervisor(
     ticket_id: str,
@@ -1008,7 +954,6 @@ def assign_reopened_supervisor(
         _sync_incident_from_ticket(doc, {"updatedAt": doc.get("updatedAt")})
 
     return {"success": True, "data": serialize_doc(doc)}
-
 
 @router.post("/{ticket_id}/assign")
 def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = Depends(get_official_user)):
@@ -1138,7 +1083,6 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
         _notify_ticket_update(doc)
     return {"success": True, "data": serialize_doc(doc)}
 
-
 @router.post("/{ticket_id}/progress-update")
 def update_ticket_progress(
     ticket_id: str,
@@ -1183,7 +1127,6 @@ def update_ticket_progress(
                 detail="Only the original field inspector can edit this update",
             )
         editable_reference = _resolve_field_inspector_last_update_at(existing, current_user_id)
-        # No time limit - field inspectors can edit their updates anytime
         editable_log_entry = _latest_editable_field_inspector_log(ticket_id, current_user_id)
         if editable_log_entry is None:
             raise HTTPException(
@@ -1314,7 +1257,6 @@ def update_ticket_progress(
             )
     return {"success": True, "data": serialize_doc(doc)}
 
-
 @router.delete("/{ticket_id}/logbook/{entry_id}")
 def delete_ticket_logbook_entry(
     ticket_id: str,
@@ -1357,12 +1299,9 @@ def delete_ticket_logbook_entry(
     incident_logs.delete_one({"_id": entry_obj_id})
     return {"success": True, "message": "Logbook entry deleted"}
 
-
 @router.get("/{ticket_id}/logbook")
 def get_ticket_logbook_entries(ticket_id: str, current_user: dict = Depends(get_current_user)):
     doc = _get_ticket_doc(ticket_id)
-    # Any authenticated official account can read official ticket activity logs.
-    # Reporters (citizen accounts) are still limited to their own tickets.
     if not is_official_account(current_user) and not _is_ticket_reporter(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     data = get_ticket_logbook(ticket_id)

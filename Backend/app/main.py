@@ -46,17 +46,13 @@ def _warmup_priority_model_background():
     try:
         warmup_priority_model()
     except Exception as exc:
-        # Do not block API startup if model warmup fails.
         LOGGER.warning("Incident priority model warmup failed during startup: %s", exc)
-
 
 def _warmup_progress_model_background():
     try:
         warmup_progress_model()
     except Exception as exc:
-        # Do not block API startup if model warmup fails.
         LOGGER.warning("Ticket progress model warmup failed during startup: %s", exc)
-
 
 def _warmup_logbook_model_background():
     try:
@@ -64,13 +60,11 @@ def _warmup_logbook_model_background():
     except Exception as exc:
         LOGGER.warning("Logbook sentence model warmup failed during startup: %s", exc)
 
-
 def _warmup_pincode_index_background():
     try:
         warmup_pincode_index()
     except Exception as exc:
         LOGGER.warning("Pincode index warmup failed during startup: %s", exc)
-
 
 @app.on_event("startup")
 def startup():

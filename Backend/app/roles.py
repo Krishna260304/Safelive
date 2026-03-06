@@ -21,13 +21,11 @@ WORKER_SPECIALIZATIONS = (
     "Other",
 )
 
-
 def normalize_official_role(value: str | None) -> str | None:
     normalized = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if normalized in OFFICIAL_ROLES:
         return normalized
     return None
-
 
 def normalize_worker_specialization(value: str | None) -> str | None:
     text = (value or "").strip()

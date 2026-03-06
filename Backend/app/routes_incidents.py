@@ -187,7 +187,6 @@ def _ticket_status_for_incident(doc: dict) -> str:
     ticket_doc = tickets.find_one({"incidentId": incident_id}, {"status": 1})
     return (ticket_doc or {}).get("status", "").strip().lower()
 
-
 def _has_official_logbook_action(doc: dict) -> bool:
     incident_object_id = doc.get("_id")
     incident_id = str(incident_object_id) if incident_object_id is not None else ""
@@ -212,7 +211,6 @@ def _reporter_edit_locked(doc: dict) -> bool:
         return True
     ticket_status = _ticket_status_for_incident(doc)
     return ticket_status in {"verified", "in_progress", "resolved"}
-
 
 def _reporter_delete_locked(doc: dict) -> bool:
     incident_status = (doc.get("status") or "").strip().lower()
@@ -579,7 +577,6 @@ def get_incident(incident_id: str, current_user: dict = Depends(get_current_user
     doc["officialActionTaken"] = _reporter_edit_locked(doc)
     doc["reporterDeleteLocked"] = _reporter_delete_locked(doc)
     return {"success": True, "data": _sanitize_incident_payload(serialize_doc(doc))}
-
 
 @router.get("/incidents/{incident_id}/logbook")
 @router.get("/issues/{incident_id}/logbook")

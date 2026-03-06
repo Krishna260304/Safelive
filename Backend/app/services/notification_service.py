@@ -92,7 +92,6 @@ def send_sms(to_phone: str, message: str):
     if provider == "firebase":
         if (settings.FIREBASE_SMS_FUNCTION_URL or "").strip():
             return _firebase_sms_request(to_phone, message)
-        # Allow a safe fallback when provider was switched but Firebase endpoint is not configured yet.
         if not (
             (settings.TWILIO_ACCOUNT_SID or "").strip()
             and (settings.TWILIO_AUTH_TOKEN or "").strip()

@@ -52,7 +52,6 @@ export const nameSchema = z
   .max(100, { message: "Name must be less than 100 characters" })
   .regex(/^[a-zA-Z\s'-]+$/, { message: "Name can only contain letters, spaces, hyphens and apostrophes" });
 
-// Login form schemas
 export const emailLoginSchema = z.object({
   email: emailSchema,
   password: z.string().min(1, { message: "Password is required" }),
@@ -65,7 +64,6 @@ export const phoneLoginSchema = z.object({
   captcha: z.string().min(1, { message: "Please solve the captcha" }),
 });
 
-// Registration schema
 export const registrationSchema = z.object({
   fullName: nameSchema,
   email: optionalEmailSchema,
@@ -107,7 +105,6 @@ export const registrationSchema = z.object({
   path: ["workerSpecialization"],
 });
 
-// Forgot password schema
 export const forgotPasswordEmailSchema = z.object({
   email: emailSchema,
 });
@@ -116,13 +113,11 @@ export const forgotPasswordPhoneSchema = z.object({
   phone: phoneSchema,
 });
 
-// OTP validation
 export const otpSchema = z
   .string()
   .length(6, { message: "OTP must be 6 digits" })
   .regex(/^\d{6}$/, { message: "OTP must contain only numbers" });
 
-// Reset password schema
 export const resetPasswordSchema = z.object({
   password: passwordSchema,
   confirmPassword: z.string(),
@@ -131,7 +126,6 @@ export const resetPasswordSchema = z.object({
   path: ["confirmPassword"],
 });
 
-// Types
 export type EmailLoginFormData = z.infer<typeof emailLoginSchema>;
 export type PhoneLoginFormData = z.infer<typeof phoneLoginSchema>;
 export type RegistrationFormData = z.infer<typeof registrationSchema>;

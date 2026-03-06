@@ -69,7 +69,6 @@ def _mask_phone(value: str | None) -> str | None:
         return None
     suffix = digits[-4:]
     if phone.startswith("+"):
-        # Keep the country code prefix length (best-effort).
         prefix = phone[: phone.find(digits[0])] if digits and digits[0] in phone else "+"
         return f"{prefix}{'*' * max(4, len(digits) - 4)}{suffix}"
     return f"{'*' * max(4, len(digits) - 4)}{suffix}"
@@ -113,7 +112,6 @@ def create_and_send_otp(user_doc: dict, purpose: str) -> OtpChallengeInfo:
     otp_value = _generate_otp()
     expires_at = now + timedelta(minutes=max(1, settings.OTP_EXPIRE_MINUTES))
 
-    # Invalidate any previous active challenges for this purpose.
     otp_challenges.update_many(
         {"userId": user_id, "purpose": purpose, "used": False},
         {"$set": {"used": True, "invalidatedAt": now}},

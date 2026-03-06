@@ -93,8 +93,6 @@ class ApiClient {
           getTextErrorFallback(responseText, response.status, response.statusText) ||
           'Request failed';
 
-        // If the stored token is no longer valid (common after backend restart when SECRET_KEY changes),
-        // clear local auth state to avoid the app getting stuck on empty pages.
         if (response.status === 401 && token) {
           localStorage.removeItem('auth_token');
           localStorage.removeItem('user');

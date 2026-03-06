@@ -11,16 +11,13 @@ from app.utils import serialize_doc
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 OFFICIAL_ROLES = {"official", "head_supervisor"}
 
-
 def _normalize_role(value: str | None) -> str:
     return (value or "").strip().lower()
-
 
 def is_official_account(user: dict | None) -> bool:
     if not isinstance(user, dict):
         return False
     return _normalize_role(user.get("userType")) in OFFICIAL_ROLES
-
 
 def is_head_supervisor_account(user: dict | None) -> bool:
     if not isinstance(user, dict):
@@ -81,12 +78,10 @@ def get_official_user(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Official or head supervisor access required")
     return current_user
 
-
 def get_head_supervisor_user(current_user: dict = Depends(get_current_user)):
     if not is_head_supervisor_account(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Head supervisor access required")
     return current_user
-
 
 def require_official_roles(*allowed_roles: str):
     normalized_allowed = {normalize_official_role(role) for role in allowed_roles}

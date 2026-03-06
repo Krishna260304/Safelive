@@ -129,7 +129,6 @@ const getFieldInspectorEditWindowMsLeft = (ticket: Ticket, currentUserId: string
   if (lastUpdateMs === null) {
     return -1;
   }
-  // No time limit - inspectors can always edit their last update
   return 1;
 };
 
@@ -539,16 +538,13 @@ const OfficialDashboard = () => {
     const ticketLabel = logbookTicket ? displayTicketId(logbookTicket) : 'ticket';
     const safeTicketLabel = toSafeFileToken(ticketLabel);
     
-    // Prepare data for Excel
     const worksheetData: (string | null)[][] = [
       ['Location', 'Details', 'Actor', 'Date', 'Time'],
       ...logbookRows.map((row) => [row.location, row.details, row.actor, row.date, row.time]),
     ];
 
-    // Create worksheet
     const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
     
-    // Set column widths
     worksheet['!cols'] = [
       { wch: 20 },
       { wch: 40 },
@@ -557,11 +553,9 @@ const OfficialDashboard = () => {
       { wch: 10 },
     ];
 
-    // Create workbook
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Logbook');
 
-    // Write file
     XLSX.writeFile(workbook, `ticket-logbook-${safeTicketLabel}.xlsx`);
   }, [logbookRows, logbookTicket, toast]);
 
@@ -843,7 +837,6 @@ const OfficialDashboard = () => {
         return;
       }
       
-      // Update the ticket immediately with the response data
       if (response.data) {
         patchTicket(ticketId, response.data);
       }
@@ -864,8 +857,6 @@ const OfficialDashboard = () => {
         delete next[ticketId];
         return next;
       });
-      // Don't refetch immediately - let the patch take effect
-      // The automatic polling (every 15 seconds) will sync any server changes
     } finally {
       setProgressSubmittingId(null);
     }

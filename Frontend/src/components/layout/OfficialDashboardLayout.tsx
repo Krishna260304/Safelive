@@ -51,8 +51,6 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
   const user = authService.getCurrentUser();
   const role = toOfficialRole(user?.officialRole);
   const userName = user?.fullName || user?.name || user?.email || 'Official';
-  // For supervisors and field_inspectors, always show role label
-  // For department and workers, show their department if available
   const userDept = 
     (role === 'supervisor' || role === 'field_inspector') 
       ? roleLabelMap[role]

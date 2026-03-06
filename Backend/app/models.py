@@ -60,11 +60,9 @@ class TicketAssign(BaseModel):
     assigneePhoto: str | None = None
     notes: str | None = None
 
-
 class TicketAssignSupervisor(BaseModel):
     supervisorId: str
     notes: str | None = None
-
 
 class TicketProgressUpdate(BaseModel):
     updateText: str
@@ -80,7 +78,6 @@ class UserUpdate(BaseModel):
     address: str | None = None
     pincode: str | None = None
     department: str | None = None
-
 
 class DepartmentOfficialCreate(BaseModel):
     name: str
@@ -99,15 +96,12 @@ class ResetPasswordRequest(BaseModel):
     token: str
     password: str
 
-
 class OtpVerifyRequest(BaseModel):
     challengeId: str
     otp: str
 
-
 class PasswordChangeRequestOtp(BaseModel):
     currentPassword: str
-
 
 class PasswordChangeConfirm(BaseModel):
     challengeId: str

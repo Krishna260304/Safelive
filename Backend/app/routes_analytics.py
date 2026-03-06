@@ -6,7 +6,6 @@ from app.auth import get_official_user
 
 router = APIRouter(prefix="/api/analytics")
 
-
 def _parse_datetime(value):
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -25,7 +24,6 @@ def _parse_datetime(value):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
-
 def _day_key(value, default_day: str):
     parsed = _parse_datetime(value)
     if parsed is not None:
@@ -34,13 +32,11 @@ def _day_key(value, default_day: str):
         return value[:10]
     return default_day
 
-
 def _safe_float(value):
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
-
 
 def _status_breakdown(collection):
     total = collection.count_documents({})
@@ -57,7 +53,6 @@ def _status_breakdown(collection):
         "resolutionRate": round((resolved_count / total) * 100, 2) if total > 0 else 0,
     }
 
-
 def _average_resolution_hours():
     cursor = tickets.find({"status": "resolved"}, {"createdAt": 1, "updatedAt": 1})
     durations = []
@@ -73,7 +68,6 @@ def _average_resolution_hours():
     if not durations:
         return 0
     return round(sum(durations) / len(durations), 2)
-
 
 def _build_worker_productivity():
     productivity_pipeline = [

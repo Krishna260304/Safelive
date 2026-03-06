@@ -293,7 +293,6 @@ class TextPriorityModel:
                 from transformers import pipeline
                 
                 device_id = _resolve_hf_device()
-                # If CUDA is available, prioritize GPU attempts
                 if device_id >= 0:
                     load_attempts = [
                         {"device": device_id},
@@ -302,7 +301,6 @@ class TextPriorityModel:
                         {},
                     ]
                 else:
-                    # CPU only attempts
                     load_attempts = [
                         {"device": -1},
                         {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
@@ -315,7 +313,6 @@ class TextPriorityModel:
                 for load_kwargs in load_attempts:
                     current_device = load_kwargs.get("device", device_id)
                     
-                    # If we already loaded on GPU, don't try CPU
                     if loaded_on_gpu and current_device < 0:
                         continue
                     

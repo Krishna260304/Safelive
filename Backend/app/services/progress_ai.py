@@ -92,7 +92,6 @@ def _resolve_hf_pipeline_device() -> tuple[int, str]:
 
 
 def _progress_pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
-    # If CUDA is available, prioritize GPU attempts
     if device_id >= 0:
         candidates = [
             {"device": device_id},
@@ -102,7 +101,6 @@ def _progress_pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
             {},
         ]
     else:
-        # CPU only attempts
         candidates = [
             {"device": -1},
             {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
@@ -272,12 +270,10 @@ def _heuristic_progress(text: str, ticket_type: str | None = None) -> tuple[int,
         token in blob
         for token in ("not done", "not completed", "incomplete", "pending", "remaining")
     )
-    # Common plain-language completion markers used in field updates.
     if not has_incomplete_marker and any(
         token in blob for token in ("all done", "job done", "completed all", "everything completed")
     ):
         score = max(score, 95.0)
-    # High-confidence completion markers.
     if any(token in blob for token in ("fully completed", "completed", "work done", "finished")):
         score = max(score, 95.0)
     if any(token in blob for token in ("verified completed", "all tasks closed", "handover complete")):
@@ -327,7 +323,6 @@ def _apply_history_policy(
     source = predicted_source
     confidence = round(max(0.0, min(1.0, predicted_confidence)), 4)
 
-    # Blend prediction with historical baseline so the model remains history-aware.
     if history_peak > 0:
         if regression:
             adjusted = min(adjusted, history_peak)
@@ -336,7 +331,6 @@ def _apply_history_policy(
             blended = (adjusted * 0.75) + (history_peak * 0.25)
             adjusted = _round_step(blended)
             adjusted = max(adjusted, history_peak)
-            # Prevent unrealistic one-step jumps unless explicitly provided.
             if adjusted - history_peak > 35:
                 adjusted = _round_step(history_peak + 35)
             source = f"{source}_history_aware"
@@ -398,7 +392,6 @@ class _ProgressModel:
                     for load_kwargs in _progress_pipeline_load_attempts(device_id):
                         current_device = load_kwargs.get("device", device_id)
                         
-                        # If we already loaded on GPU, don't try CPU
                         if loaded_on_gpu and current_device < 0:
                             continue
                         

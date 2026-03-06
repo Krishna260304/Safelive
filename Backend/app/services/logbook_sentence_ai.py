@@ -161,7 +161,6 @@ def _sanitize_generated_sentence(text: str, actor: dict | None) -> str | None:
     cleaned = re.sub(r"(?is)\s*actor:\s*([^.;]+)", lambda m: f" by {m.group(1).strip()}", cleaned).strip()
     cleaned = re.sub(r"(?is)\bis an actor\b", "", cleaned).strip()
 
-    # Never keep model outputs that still contain the word "actor".
     if re.search(r"(?is)\bactor\b", cleaned):
         return None
 
@@ -186,7 +185,6 @@ def _resolve_hf_pipeline_device() -> int:
 
 
 def _pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
-    # If CUDA is available, prioritize GPU attempts
     if device_id >= 0:
         candidates = [
             {"device": device_id},
@@ -196,7 +194,6 @@ def _pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
             {},
         ]
     else:
-        # CPU only attempts
         candidates = [
             {"device": -1},
             {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
@@ -257,7 +254,6 @@ class _LogbookSentenceModel:
                     for load_kwargs in _pipeline_load_attempts(device_id):
                         current_device = load_kwargs.get("device", device_id)
                         
-                        # If we already loaded on GPU, don't try CPU
                         if loaded_on_gpu and current_device < 0:
                             continue
                         

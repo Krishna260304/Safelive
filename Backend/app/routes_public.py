@@ -33,7 +33,6 @@ def summary():
         }
     }
 
-
 @router.get("/pincode/{pincode}")
 def verify_pincode(pincode: str):
     normalized = normalize_pincode(pincode)

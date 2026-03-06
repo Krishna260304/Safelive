@@ -143,7 +143,6 @@ def _estimate_ticket_progress(doc: dict) -> tuple[int, float, str]:
     if status == "resolved":
         return 100, 1.0, "status_resolved"
 
-    # Avoid fake non-zero completion before team assignment.
     if status == "open" and not has_team:
         return 0, 1.0, "awaiting_assignment"
 
@@ -161,7 +160,6 @@ def _estimate_ticket_progress(doc: dict) -> tuple[int, float, str]:
     )
     percent = int(max(0, min(100, prediction.percent)))
 
-    # Keep open tickets in early-progress range.
     if status == "open":
         percent = min(percent, 40)
     if has_team and status == "in_progress":
@@ -201,7 +199,6 @@ def run_auto_progress_pass() -> None:
         current_percent = int(doc.get("progressPercent") or 0)
         status = _normalize_status(doc.get("status"))
         if status in {"open", "in_progress"} and current_percent > 0:
-            # Keep completion monotonic while the ticket remains active.
             percent = max(percent, current_percent)
         current_source = str(doc.get("progressSource") or "")
         current_confidence = float(doc.get("progressConfidence") or 0.0)

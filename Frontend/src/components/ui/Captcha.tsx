@@ -23,7 +23,6 @@ export const Captcha = ({ value, onChange, onValidChange, error }: CaptchaProps)
     let nextNum1 = Math.floor(Math.random() * 10) + 1;
     let nextNum2 = Math.floor(Math.random() * 10) + 1;
 
-    // Keep subtraction non-negative so answers stay compatible with numeric-only input.
     if (nextOperation === '-' && nextNum1 < nextNum2) {
       [nextNum1, nextNum2] = [nextNum2, nextNum1];
     }

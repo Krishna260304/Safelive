@@ -191,7 +191,6 @@ const Dashboard = () => {
     return { total, open, inProgress, resolved, high };
   }, [incidents]);
 
-  // Data for status pie chart
   const statusData = useMemo(() => {
     return [
       { name: 'Open', value: stats.open, fill: '#0ea5e9' },
@@ -200,7 +199,6 @@ const Dashboard = () => {
     ].filter(item => item.value > 0);
   }, [stats]);
 
-  // Data for category breakdown
   const categoryData = useMemo(() => {
     const categories: Record<string, number> = {};
     incidents.forEach((i) => {
@@ -211,7 +209,6 @@ const Dashboard = () => {
       .sort((a, b) => b.value - a.value);
   }, [incidents]);
 
-  // Data for timeline
   const timelineData = useMemo(() => {
     const dates: Record<string, number> = {};
     incidents.forEach((i) => {
@@ -463,7 +460,6 @@ const Dashboard = () => {
     const incidentLabel = logbookIncident ? displayIncidentId(logbookIncident) : 'incident';
     const safeIncidentLabel = toSafeFileToken(incidentLabel);
 
-    // Prepare data for Excel
     const worksheetData: (string)[][] = [
       ['Action', 'Details', 'Date', 'Time'],
       ...logbookRows.map((row) => [
@@ -474,17 +470,13 @@ const Dashboard = () => {
       ]),
     ];
 
-    // Create worksheet
     const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
 
-    // Set column widths
     worksheet['!cols'] = [{ wch: 28 }, { wch: 58 }, { wch: 14 }, { wch: 10 }];
 
-    // Create workbook
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Logbook');
 
-    // Write file
     XLSX.writeFile(workbook, `incident-logbook-${safeIncidentLabel}.xlsx`);
   }, [logbookRows, logbookIncident, toast]);
 
