@@ -24,7 +24,6 @@ CATEGORY_HINTS = {
 
 SUSPICIOUS_TEXT_HINTS = (
     "test report",
-    "dummy report",
     "just checking",
     "ignore this",
     "fake report",
@@ -152,7 +151,7 @@ def _score_description(title: str | None, description: str | None, category: str
 
     if any(flag in text for flag in SUSPICIOUS_TEXT_HINTS):
         score -= 0.3
-        reasons.append("Description looks like a test/dummy report.")
+        reasons.append("Description appears to be non-genuine.")
 
     return _clamp(score, 0.0, 1.0), reasons
 
