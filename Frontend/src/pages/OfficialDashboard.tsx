@@ -1085,7 +1085,8 @@ const OfficialDashboard = () => {
               const reopenedSupervisorId = (ticket.reopenedSupervisorId || '').trim();
               const reopenedSupervisorName = (ticket.reopenedSupervisorName || '').trim();
               const hasReopenedSupervisor = reopenedSupervisorId.length > 0;
-              const supervisorAssignedToCurrentUser = !isReopenedCase || !reopenedSupervisorId || reopenedSupervisorId === currentUserId;
+              const supervisorAssignedToCurrentUser =
+                role === 'department' || !isReopenedCase || !reopenedSupervisorId || reopenedSupervisorId === currentUserId;
               const isReopenedAwaitingSupervisorAssignment = role === 'department' && isReopenedCase && !hasReopenedSupervisor;
               const isResolved = ticket.status === 'resolved';
               const isVerified = ticket.status === 'verified';
@@ -1095,7 +1096,7 @@ const OfficialDashboard = () => {
               const inspectorEditWindowActive = inspectorEditWindowMsLeft >= 0;
               const canVerifyStep = !isResolved && !isVerified;
               const canAssignWorkersStep = !isResolved && isVerified && !hasAssignedWorker;
-              const canResolveStep = !isResolved && isVerified && hasAssignedWorker;
+              const canResolveStep = !isResolved && isVerified && (hasAssignedWorker || isReopenedCase);
               const canReopen = role === 'department' && ticket.status === 'resolved';
               const canRoleRunWorkflow =
                 (role === 'department' || role === 'supervisor') &&

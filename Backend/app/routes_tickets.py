@@ -716,7 +716,7 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
                 status_code=400,
                 detail="Assign a supervisor first for reopened tickets before verification or resolution",
             )
-        if role == ROLE_DEPARTMENT:
+        if role == ROLE_SUPERVISOR and str(current_user.get("id") or "").strip() != reopened_supervisor_id:
             raise HTTPException(
                 status_code=403,
                 detail="Only the assigned supervisor can verify or resolve reopened tickets",
@@ -725,7 +725,7 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
     if normalized_status == "resolved":
         if role not in {ROLE_DEPARTMENT, ROLE_SUPERVISOR}:
             raise HTTPException(status_code=403, detail="Only department or supervisor can mark tickets resolved")
-        if not _has_worker_assignment(existing):
+        if not _has_worker_assignment(existing) and not is_reopened_case:
             raise HTTPException(status_code=400, detail="Assign workers before resolving the ticket")
     if reopening and role != ROLE_DEPARTMENT:
         raise HTTPException(status_code=403, detail="Only department can reopen resolved tickets")
@@ -984,7 +984,7 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
                 status_code=400,
                 detail="Assign a supervisor first for reopened tickets before worker assignment",
             )
-        if role == ROLE_DEPARTMENT:
+        if role == ROLE_SUPERVISOR and str(current_user.get("id") or "").strip() != reopened_supervisor_id:
             raise HTTPException(
                 status_code=403,
                 detail="Only the assigned supervisor can assign workers for reopened tickets",
