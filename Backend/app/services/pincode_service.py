@@ -15,7 +15,6 @@ class PincodeIndex:
         self._lock = Lock()
         self._loaded = False
         self._source_path: str | None = None
-        self._pincodes: set[str] = set()
         self._records: dict[str, dict[str, str]] = {}
 
     def ensure_loaded(self) -> None:
@@ -36,19 +35,26 @@ class PincodeIndex:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                pincode = str((row or {}).get("pincode") or "").strip()
+                normalized_row = _normalize_csv_row(row)
+                pincode = normalized_row.get("pincode") or ""
                 if not PINCODE_PATTERN.fullmatch(pincode):
                     continue
-                self._pincodes.add(pincode)
                 if pincode not in self._records:
                     self._records[pincode] = {
-                        "taluk": str((row or {}).get("Taluk") or "").strip(),
-                        "district": str((row or {}).get("Districtname") or "").strip(),
-                        "state": str((row or {}).get("statename") or "").strip(),
+                        "taluk": normalized_row.get("taluk")
+                        or normalized_row.get("tehsil")
+                        or normalized_row.get("subdistrict")
+                        or "",
+                        "district": normalized_row.get("districtname")
+                        or normalized_row.get("district")
+                        or "",
+                        "state": normalized_row.get("statename")
+                        or normalized_row.get("state")
+                        or "",
                     }
 
         self._source_path = str(path)
-        LOGGER.info("Loaded %d pincodes from %s", len(self._pincodes), path)
+        LOGGER.info("Loaded %d pincodes from %s", len(self._records), path)
 
     @property
     def source_path(self) -> str | None:
@@ -58,14 +64,14 @@ class PincodeIndex:
     @property
     def count(self) -> int:
         self.ensure_loaded()
-        return len(self._pincodes)
+        return len(self._records)
 
     def contains(self, value: str | None) -> bool:
         normalized = normalize_pincode(value)
         if not normalized:
             return False
         self.ensure_loaded()
-        return normalized in self._pincodes
+        return normalized in self._records
 
     def get_record(self, value: str | None) -> dict[str, str] | None:
         normalized = normalize_pincode(value)
@@ -82,10 +88,16 @@ def _candidate_paths() -> list[Path]:
     paths: list[Path] = []
     configured = str(getattr(settings, "PINCODE_CSV_PATH", "") or "").strip()
     if configured:
-        paths.append(Path(configured))
+        configured_path = Path(configured)
+        paths.append(configured_path)
+        if not configured_path.is_absolute():
+            paths.append(settings.BASE_DIR / configured_path)
 
+    paths.append(settings.BASE_DIR / "pincode-dataset.csv")
+    paths.append(settings.BASE_DIR / "data" / "pincode-dataset.csv")
     paths.append(settings.BASE_DIR / "data" / "india pincode final.csv")
     paths.append(settings.BASE_DIR.parent / "india pincode final.csv")
+    paths.append(settings.BASE_DIR.parent / "pincode-dataset.csv")
     paths.append(Path.home() / "Downloads" / "india pincode final.csv")
 
     unique_paths: list[Path] = []
@@ -104,6 +116,20 @@ def _resolve_csv_path() -> Path | None:
         if path.exists() and path.is_file():
             return path
     return None
+
+
+def _normalize_csv_key(value: str | None) -> str:
+    return str(value or "").replace("\ufeff", "").strip().lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
+def _normalize_csv_row(row: dict | None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in (row or {}).items():
+        normalized_key = _normalize_csv_key(str(key or ""))
+        if not normalized_key or normalized_key in normalized:
+            continue
+        normalized[normalized_key] = str(value or "").strip()
+    return normalized
 
 
 def normalize_pincode(value: str | None) -> str | None:

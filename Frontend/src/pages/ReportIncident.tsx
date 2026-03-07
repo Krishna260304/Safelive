@@ -33,7 +33,7 @@ const incidentSchema = z.object({
   description: z.string().trim().min(20, 'Description must be at least 20 characters').max(1000, 'Description too long'),
   category: z.string().min(1, 'Please select a category'),
   address: z.string().trim().min(10, 'Please enter complete address').max(200, 'Address too long'),
-  pincode: z.string().regex(/^\d{6}$/, 'Enter valid 6-digit pincode'),
+  pincode: z.string().trim().optional(),
 });
 
 type IncidentFormData = z.infer<typeof incidentSchema>;
@@ -58,6 +58,39 @@ type GpsCoords = {
   source: 'live_gps' | 'map_pick';
 };
 
+const PINCODE_PATTERN = /^\d{6}$/;
+
+const parsePincodeFromText = (value: string | undefined): string | null => {
+  const text = (value || '').trim();
+  if (!text) return null;
+  const digitsOnly = text.replace(/\D/g, '');
+  if (PINCODE_PATTERN.test(digitsOnly)) return digitsOnly;
+  if (PINCODE_PATTERN.test(text)) return text;
+  const match = text.match(/\b(\d{6})\b/);
+  return match ? match[1] : null;
+};
+
+const reverseGeocodePincode = async (lat: number, lon: number): Promise<string | null> => {
+  const endpoint = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+    lat.toString(),
+  )}&lon=${encodeURIComponent(lon.toString())}&zoom=18&addressdetails=1`;
+  const response = await fetch(endpoint, {
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const payload = (await response.json()) as {
+    address?: {
+      postcode?: string;
+    };
+    display_name?: string;
+  };
+  return parsePincodeFromText(payload.address?.postcode) || parsePincodeFromText(payload.display_name);
+};
+
 const getGpsErrorMessage = (error: GeolocationPositionError | null) => {
   if (!error) return 'Unable to fetch device GPS location.';
   if (error.code === error.PERMISSION_DENIED) return 'Location permission denied. Enable GPS/location access and try again.';
@@ -77,11 +110,49 @@ const ReportIncident = () => {
   const [locationDialogOpen, setLocationDialogOpen] = useState(false);
   const [locationDraft, setLocationDraft] = useState<GpsCoords | null>(null);
   const [locationError, setLocationError] = useState('');
+  const [isResolvingPincode, setIsResolvingPincode] = useState(false);
+  const [pincodeHint, setPincodeHint] = useState('');
+  const latestReversePincodeRequest = useRef(0);
 
   const form = useForm<IncidentFormData>({
     resolver: zodResolver(incidentSchema),
     mode: 'onBlur',
+    defaultValues: {
+      pincode: '',
+    },
   });
+
+  const resolvePincodeFromCoords = useCallback(
+    async (nextCoords: GpsCoords) => {
+      const requestId = latestReversePincodeRequest.current + 1;
+      latestReversePincodeRequest.current = requestId;
+      setIsResolvingPincode(true);
+      setPincodeHint('Fetching pincode from selected location...');
+      try {
+        const detectedPincode = await reverseGeocodePincode(nextCoords.lat, nextCoords.lon);
+        if (latestReversePincodeRequest.current !== requestId) {
+          return;
+        }
+        if (!detectedPincode) {
+          setPincodeHint('Could not auto-detect pincode for this point. You can enter it manually.');
+          return;
+        }
+        form.setValue('pincode', detectedPincode, { shouldDirty: true, shouldValidate: false });
+        form.clearErrors('pincode');
+        setPincodeHint(`Pincode ${detectedPincode} imported from map location.`);
+      } catch {
+        if (latestReversePincodeRequest.current !== requestId) {
+          return;
+        }
+        setPincodeHint('Could not auto-detect pincode for this point. You can enter it manually.');
+      } finally {
+        if (latestReversePincodeRequest.current === requestId) {
+          setIsResolvingPincode(false);
+        }
+      }
+    },
+    [form],
+  );
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -154,10 +225,11 @@ const ReportIncident = () => {
       const gps = await fetchGpsLocation(false);
       if (gps) {
         setCoords(gps);
+        void resolvePincodeFromCoords(gps);
       }
     };
     void loadInitialGps();
-  }, [fetchGpsLocation]);
+  }, [fetchGpsLocation, resolvePincodeFromCoords]);
 
   const removeImage = (index: number) => {
     setImages(prev => {
@@ -195,7 +267,7 @@ const ReportIncident = () => {
         title: data.title,
         description: data.description,
         category: data.category,
-        location: `${data.address}, Pincode: ${data.pincode}`,
+        location: data.pincode ? `${data.address}, Pincode: ${data.pincode}` : data.address,
         latitude: coords.lat,
         longitude: coords.lon,
         images: images.map(img => img.file),
@@ -263,6 +335,7 @@ const ReportIncident = () => {
     }
     setCoords(locationDraft);
     setLocationDialogOpen(false);
+    void resolvePincodeFromCoords(locationDraft);
   };
 
   return (
@@ -414,6 +487,7 @@ const ReportIncident = () => {
                     const gps = await fetchGpsLocation(true);
                     if (gps) {
                       setCoords(gps);
+                      void resolvePincodeFromCoords(gps);
                     }
                   }}
                   disabled={isSubmitting || isLocating}
@@ -453,11 +527,12 @@ const ReportIncident = () => {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="pincode">Pincode *</Label>
+              <Label htmlFor="pincode">Pincode</Label>
               <Input
                 id="pincode"
                 placeholder="123456"
                 maxLength={6}
+                inputMode="numeric"
                 {...form.register('pincode')}
                 className={cn(
                   "w-32",
@@ -468,6 +543,12 @@ const ReportIncident = () => {
                 <p className="text-sm text-destructive">
                   {form.formState.errors.pincode.message}
                 </p>
+              )}
+              {!form.formState.errors.pincode && isResolvingPincode && (
+                <p className="text-xs text-muted-foreground">Detecting pincode from map...</p>
+              )}
+              {!form.formState.errors.pincode && !isResolvingPincode && pincodeHint && (
+                <p className="text-xs text-muted-foreground">{pincodeHint}</p>
               )}
             </div>
           </div>

@@ -125,7 +125,11 @@ export const RegisterForm = () => {
       }
 
       form.clearErrors('pincode');
-      setPincodeLocation(`${response.data.taluk}, ${response.data.district}, ${response.data.state}`);
+      const locationLabel = [response.data.taluk, response.data.district, response.data.state]
+        .map((value) => (value || '').trim())
+        .filter(Boolean)
+        .join(', ');
+      setPincodeLocation(locationLabel || `Pincode ${response.data.pincode} verified`);
     } catch {
       if (latestPincodeRequest.current !== requestId) {
         return;

@@ -19,11 +19,11 @@ export interface PublicSummary {
 
 export interface PincodeLookup {
   pincode: string;
-  taluk: string;
-  district: string;
-  state: string;
-  datasetCount: number;
-  datasetSource: string;
+  taluk?: string;
+  district?: string;
+  state?: string;
+  datasetCount?: number;
+  datasetSource?: string | null;
 }
 
 export const publicService = {
