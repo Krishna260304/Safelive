@@ -8,11 +8,14 @@ export default defineConfig({
   server: {
     host: "::",
     port: 8080,
+    strictPort: true,
     allowedHosts: [
       '.trycloudflare.com',
       '.loca.lt',
       '.ngrok-free.app',
       'localhost',
+      'safelive.in',
+      '.safelive.in',
     ],
     hmr: {
       overlay: false,
