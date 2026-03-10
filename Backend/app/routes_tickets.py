@@ -21,8 +21,8 @@ ROLE_FIELD_INSPECTOR = "field_inspector"
 ROLE_WORKER = "worker"
 TICKET_STATUSES = {"open", "pending", "in_progress", "verified", "resolved"}
 FIELD_INSPECTOR_EDIT_WINDOW_MINUTES = 2
-FIELD_INSPECTOR_VISIBLE_STATUSES = {"open", "pending", "verified", "in_progress", "resolved"}
-FIELD_INSPECTOR_EDITABLE_STATUSES = {"open", "pending", "verified", "in_progress"}
+FIELD_INSPECTOR_VISIBLE_STATUSES = {"verified", "in_progress", "resolved"}
+FIELD_INSPECTOR_EDITABLE_STATUSES = {"verified", "in_progress"}
 FIELD_INSPECTOR_NOTE_PREFIXES = (
     "field inspector update",
     "field inspector progress update",

@@ -24,6 +24,7 @@ from app.services.audit_log import get_incident_logbook
 from app.config.settings import settings
 from app.issue_model import IssueIn
 from app.auth import get_current_user, is_official_account
+from app.roles import normalize_official_role
 from app.utils import serialize_doc, serialize_list, to_object_id
 
 router = APIRouter(prefix="/api")
@@ -58,6 +59,7 @@ IOT_PRIORITY_BY_SEVERITY = {
     "high": "high",
 }
 OFFICIAL_ACTIVITY_ROLES = {"department", "supervisor", "field_inspector", "worker"}
+ROLE_FIELD_INSPECTOR = "field_inspector"
 LOCAL_REPORTER_EDIT_WINDOW_MINUTES = 5
 
 def _now_iso():
@@ -172,8 +174,36 @@ def _get_incident_doc(incident_id: str):
 def _is_official(user: dict):
     return is_official_account(user)
 
+def _current_official_role(user: dict) -> str | None:
+    return normalize_official_role(user.get("officialRole"))
+
+def _has_department_or_supervisor_verification(doc: dict) -> bool:
+    incident_status = (doc.get("status") or "").strip().lower()
+    if incident_status in {"verified", "in_progress", "resolved"}:
+        return True
+
+    ticket_status = _ticket_status_for_incident(doc)
+    if ticket_status in {"verified", "in_progress", "resolved"}:
+        return True
+
+    incident_object_id = doc.get("_id")
+    incident_id = str(incident_object_id) if incident_object_id is not None else ""
+    if not incident_id:
+        return False
+
+    verification_log = incident_logs.find_one(
+        {
+            "incidentId": incident_id,
+            "action": {"$in": ["ticket_verified_by_supervisor", "ticket_verified_by_department"]},
+        },
+        {"_id": 1},
+    )
+    return bool(verification_log)
+
 def _can_access_incident(doc: dict, user: dict):
     if _is_official(user):
+        if _current_official_role(user) == ROLE_FIELD_INSPECTOR:
+            return _has_department_or_supervisor_verification(doc)
         return True
     reporter_id = doc.get("reporterId")
     if reporter_id and reporter_id == user.get("id"):
@@ -550,6 +580,8 @@ def get_incidents(current_user: dict = Depends(get_current_user)):
     if not _is_official(current_user):
         query["reporterId"] = current_user.get("id")
     data = list(incidents.find(query).sort("createdAt", -1))
+    if _current_official_role(current_user) == ROLE_FIELD_INSPECTOR:
+        data = [row for row in data if _has_department_or_supervisor_verification(row)]
     for row in data:
         row["officialActionTaken"] = _reporter_edit_locked(row)
         row["reporterDeleteLocked"] = _reporter_delete_locked(row)
@@ -563,6 +595,23 @@ def stats(current_user: dict = Depends(get_current_user)):
     query = {}
     if not _is_official(current_user):
         query["reporterId"] = current_user.get("id")
+    if _current_official_role(current_user) == ROLE_FIELD_INSPECTOR:
+        data = [row for row in incidents.find(query) if _has_department_or_supervisor_verification(row)]
+        total = len(data)
+        open_c = sum(1 for row in data if (row.get("status") or "").strip().lower() == "open")
+        pending_c = sum(1 for row in data if (row.get("status") or "").strip().lower() == "pending")
+        in_prog = sum(1 for row in data if (row.get("status") or "").strip().lower() == "in_progress")
+        resolved = sum(1 for row in data if (row.get("status") or "").strip().lower() == "resolved")
+        return {
+            "success": True,
+            "data": {
+                "total": total,
+                "open": open_c,
+                "inProgress": in_prog,
+                "resolved": resolved,
+                "pending": pending_c
+            }
+        }
     total = incidents.count_documents(query)
     open_c = incidents.count_documents({**query, "status": "open"})
     pending_c = incidents.count_documents({**query, "status": "pending"})

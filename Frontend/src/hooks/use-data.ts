@@ -12,6 +12,25 @@ import { publicService, PublicSummary } from '@/services/public';
 
 const hasAuthToken = () => !!localStorage.getItem('auth_token');
 
+const getCurrentUserRole = (): string => {
+  try {
+    const raw = localStorage.getItem('user');
+    if (!raw) return '';
+    const parsed = JSON.parse(raw) as { officialRole?: string } | null;
+    return String(parsed?.officialRole || '').trim().toLowerCase();
+  } catch {
+    return '';
+  }
+};
+
+const isIncidentVisibleToCurrentUser = (incident: Incident): boolean => {
+  const role = getCurrentUserRole();
+  if (role !== 'field_inspector') {
+    return true;
+  }
+  return ['verified', 'in_progress', 'resolved'].includes(String(incident.status || '').trim().toLowerCase());
+};
+
 const createIncidentsSocket = () => {
   if (!API_CONFIG.WS_BASE_URL) {
     return null;
@@ -36,7 +55,7 @@ export const useIncidents = () => {
     const response = await incidentService.getIncidents();
 
     if (response.success && response.data) {
-      setIncidents(response.data);
+      setIncidents(response.data.filter(isIncidentVisibleToCurrentUser));
     } else {
       setIncidents([]);
       setError(response.error || 'Failed to fetch incidents');
@@ -63,6 +82,9 @@ export const useIncidents = () => {
         const payload = JSON.parse(event.data);
         if (payload?.type === 'NEW_INCIDENT' && payload.data) {
           const normalizedIncident = normalizeIncidentMedia(payload.data as Incident);
+          if (!isIncidentVisibleToCurrentUser(normalizedIncident)) {
+            return;
+          }
           setIncidents((prev) => {
             const exists = prev.find((i) => i.id === normalizedIncident.id);
             if (exists) {
