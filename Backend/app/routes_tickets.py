@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import logging
+import threading
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user, get_official_user, is_official_account
@@ -9,7 +10,7 @@ from app.roles import normalize_official_role
 from app.services.audit_log import append_incident_log, get_ticket_logbook
 from app.services.email_service import send_ticket_update_email
 from app.services.notification_service import send_sms, send_whatsapp
-from app.services.progress_ai import MIN_PROGRESS_PERCENT, predict_ticket_progress
+from app.services.progress_ai import MIN_PROGRESS_PERCENT, predict_ticket_progress_fast
 from app.utils import serialize_doc, serialize_list, to_object_id
 
 router = APIRouter(prefix="/api/tickets")
@@ -364,6 +365,16 @@ def _notify_ticket_update(doc: dict):
             LOGGER.warning("Email notification failed for ticket %s: %s", doc.get("_id"), exc)
     elif status_value == "resolved":
         LOGGER.warning("Resolved email skipped: reporter email unavailable for ticket %s", doc.get("_id"))
+
+
+def _run_background_task(task_name: str, callback, *args, **kwargs) -> None:
+    def _worker() -> None:
+        try:
+            callback(*args, **kwargs)
+        except Exception as exc:
+            LOGGER.warning("%s failed in background: %s", task_name, exc)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 def _normalize_ticket_status(value: str) -> str:
     status = (value or "").strip().lower()
@@ -801,6 +812,10 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
         update["resolvedByName"] = str(current_user.get("name") or current_user.get("email") or "").strip()
         update["resolvedByRole"] = role
         update["resolvedAt"] = now
+        update["progressPercent"] = 100
+        update["progressSource"] = "status_resolved"
+        update["progressConfidence"] = 1.0
+        update["progressUpdatedAt"] = now
     clear_warning = not reopening and bool(existing.get("reopenWarning"))
 
     op = {"$set": update}
@@ -819,6 +834,15 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
             "status": incident_status,
             "updatedAt": doc.get("updatedAt"),
         }
+        if normalized_status == "resolved":
+            incident_updates.update(
+                {
+                    "progressPercent": doc.get("progressPercent"),
+                    "progressSource": doc.get("progressSource"),
+                    "progressConfidence": doc.get("progressConfidence"),
+                    "progressUpdatedAt": doc.get("progressUpdatedAt"),
+                }
+            )
         if reopening:
             incident_updates.update(
                 {
@@ -844,11 +868,13 @@ def update_status(ticket_id: str, payload: TicketUpdateStatus, current_user: dic
             doc,
             incident_updates,
         )
-        _notify_ticket_update(doc)
+        _run_background_task("ticket_status_notify", _notify_ticket_update, dict(doc))
 
         if reopening:
-            _notify_ticket_reopened(
-                doc,
+            _run_background_task(
+                "ticket_reopen_notify",
+                _notify_ticket_reopened,
+                dict(doc),
                 current_user,
                 previous_resolver={
                     "id": str(existing.get("resolvedById") or "").strip(),
@@ -1089,7 +1115,7 @@ def assign_ticket(ticket_id: str, payload: TicketAssign, current_user: dict = De
                 "workerCount": len(assignees),
             },
         )
-        _notify_ticket_update(doc)
+        _run_background_task("ticket_assign_notify", _notify_ticket_update, dict(doc))
     return {"success": True, "data": serialize_doc(doc)}
 
 @router.post("/{ticket_id}/progress-update")
@@ -1150,7 +1176,7 @@ def update_ticket_progress(
 
     previous_status = (existing.get("status") or "").strip().lower()
     prediction_status = "in_progress" if previous_status in {"open", "pending", "verified"} else previous_status
-    prediction = predict_ticket_progress(
+    prediction = predict_ticket_progress_fast(
         update_text,
         context={
             "ticketType": existing.get("category"),

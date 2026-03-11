@@ -21,6 +21,8 @@ users = db["users"]
 incidents = db["incidents"]
 tickets = db["tickets"]
 messages = db["messages"]
+ticket_chat_sessions = db["ticket_chat_sessions"]
+ticket_chat_messages = db["ticket_chat_messages"]
 password_resets = db["password_resets"]
 otp_challenges = db["otp_challenges"]
 incident_logs = db["incident_logs"]
@@ -267,6 +269,20 @@ def init_db():
     try:
         messages.create_index("incidentId")
         messages.create_index("createdAt")
+    except OperationFailure:
+        pass
+
+    try:
+        ticket_chat_sessions.create_index([("ticketId", 1), ("officialUserId", 1), ("localUserId", 1), ("endedAt", 1)])
+        ticket_chat_sessions.create_index("expiresAt", expireAfterSeconds=0)
+    except OperationFailure:
+        pass
+
+    try:
+        ticket_chat_messages.create_index("sessionId")
+        ticket_chat_messages.create_index("ticketId")
+        ticket_chat_messages.create_index("createdAt")
+        ticket_chat_messages.create_index("expiresAt", expireAfterSeconds=0)
     except OperationFailure:
         pass
     

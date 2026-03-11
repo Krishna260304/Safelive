@@ -65,6 +65,12 @@ export const API_ENDPOINTS = {
     LOGBOOK: (id: string) => `/tickets/${id}/logbook`,
     DELETE_LOGBOOK_ENTRY: (ticketId: string, entryId: string) => `/tickets/${ticketId}/logbook/${entryId}`,
     STATS: '/tickets/stats',
+    CHAT_OPTIONS: (id: string) => `/tickets/${id}/chat/options`,
+    CHAT_SESSIONS: (id: string) => `/tickets/${id}/chat/sessions`,
+    CHAT_MESSAGES: (ticketId: string, sessionId: string) => `/tickets/${ticketId}/chat/sessions/${sessionId}/messages`,
+    CHAT_END: (ticketId: string, sessionId: string) => `/tickets/${ticketId}/chat/sessions/${sessionId}/end`,
+    CHAT_TRANSCRIPT: (ticketId: string, sessionId: string) =>
+      `/tickets/${ticketId}/chat/sessions/${sessionId}/transcript.pdf`,
   },
 
   MESSAGES: {

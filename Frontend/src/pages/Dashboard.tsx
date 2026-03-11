@@ -4,8 +4,15 @@ import { AlertCircle, ChevronDown, ClipboardList, Clock, Download, Filter, MapPi
 import * as XLSX from 'xlsx';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { SettingsModal } from '@/components/SettingsModal';
+import { TicketChatDialog } from '@/components/tickets/TicketChatDialog';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -225,6 +232,8 @@ const Dashboard = () => {
   const [logbookEntries, setLogbookEntries] = useState<IncidentLogEntry[]>([]);
   const [logbookError, setLogbookError] = useState<string | null>(null);
   const [logbookDownloadMenuOpen, setLogbookDownloadMenuOpen] = useState(false);
+  const [chatDialogOpen, setChatDialogOpen] = useState(false);
+  const [chatIncident, setChatIncident] = useState<Incident | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
@@ -424,6 +433,11 @@ const Dashboard = () => {
     }
     setLogbookLoading(false);
   };
+
+  const handleOpenChat = useCallback((incident: Incident) => {
+    setChatIncident(incident);
+    setChatDialogOpen(true);
+  }, []);
 
   const logbookRows = useMemo(() => {
     return logbookEntries.map((entry) => ({
@@ -688,7 +702,7 @@ const Dashboard = () => {
                     key={incident.id}
                     onClick={() => setSelectedId(incident.id)}
                     className={cn(
-                      "p-4 bg-card rounded-lg border border-border cursor-pointer transition-all hover:border-primary hover:shadow-md",
+                      "relative p-4 pb-14 bg-card rounded-lg border border-border cursor-pointer transition-all hover:border-primary hover:shadow-md",
                       selected?.id === incident.id && "border-primary bg-primary/5"
                     )}
                   >
@@ -740,20 +754,40 @@ const Dashboard = () => {
                               Edit
                             </Button>
                           )}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-8 px-2 gap-1"
+                        </div>
+                      </div>
+                    </div>
+                    <div className="absolute bottom-4 right-4">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-border bg-background shadow-sm transition-colors hover:bg-muted"
+                            onClick={(event) => event.stopPropagation()}
+                            aria-label="Open chat options"
+                          >
+                            <img src="/chat-icon.svg" alt="Chat options" className="h-5 w-5 text-foreground" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem
                             onClick={(event) => {
                               event.stopPropagation();
                               void handleOpenLogbook(incident);
                             }}
                           >
-                            <ClipboardList className="h-3.5 w-3.5" />
-                            LogBook
-                          </Button>
-                        </div>
-                      </div>
+                            Get Report
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleOpenChat(incident);
+                            }}
+                          >
+                            Talk to Official
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
                   </div>
                 ))}
@@ -1054,6 +1088,24 @@ const Dashboard = () => {
           </div>
         </DialogContent>
       </Dialog>
+      <TicketChatDialog
+        open={chatDialogOpen}
+        onOpenChange={(nextOpen) => {
+          setChatDialogOpen(nextOpen);
+          if (!nextOpen) {
+            setChatIncident(null);
+          }
+        }}
+        ticket={
+          chatIncident
+            ? {
+                id: chatIncident.id,
+                ticketId: chatIncident.ticketId,
+                title: chatIncident.title,
+              }
+            : null
+        }
+      />
     </>
   );
 };

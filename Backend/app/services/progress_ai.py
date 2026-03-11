@@ -507,6 +507,34 @@ def predict_ticket_progress(update_text: str, context: dict[str, Any] | None = N
     return _progress_model.predict(update_text, context=context)
 
 
+def predict_ticket_progress_fast(update_text: str, context: dict[str, Any] | None = None) -> ProgressPrediction:
+    """Fast path for latency-sensitive endpoints (no model inference)."""
+    normalized_context = _normalize_context(context)
+
+    explicit = _extract_explicit_percent(update_text)
+    if explicit is not None:
+        return _apply_history_policy(
+            predicted_percent=explicit,
+            predicted_confidence=0.98,
+            predicted_source="explicit_percentage_fast",
+            update_text=update_text,
+            context=normalized_context,
+        )
+
+    model_input = _context_sequence(update_text, normalized_context)
+    value, confidence = _heuristic_progress(
+        model_input,
+        ticket_type=normalized_context.get("ticketType"),
+    )
+    return _apply_history_policy(
+        predicted_percent=value,
+        predicted_confidence=confidence,
+        predicted_source="heuristic_fast",
+        update_text=update_text,
+        context=normalized_context,
+    )
+
+
 def warmup_progress_model() -> ProgressPrediction:
     prediction = _progress_model.predict("Initial inspection completed and repair work started.")
     LOGGER.info(

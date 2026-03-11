@@ -15,6 +15,7 @@ import * as XLSX from 'xlsx';
 import { OfficialDashboardLayout } from '@/components/layout/OfficialDashboardLayout';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { TicketChatDialog } from '@/components/tickets/TicketChatDialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,6 +27,7 @@ import { useTickets } from '@/hooks/use-data';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
 import { incidentService } from '@/services/incidents';
+import { ticketChatService } from '@/services/ticket-chat';
 import { Ticket, TicketLogEntry, ticketService } from '@/services/tickets';
 import { ManagedOfficialAccount, usersService, WorkerAccount } from '@/services/users';
 import { cn } from '@/lib/utils';
@@ -61,6 +63,15 @@ const toRole = (value: string | undefined): DashboardRole => {
   if (normalized === 'field_inspector') return 'field_inspector';
   if (normalized === 'worker') return 'worker';
   return 'department';
+};
+
+const normalizeOfficialRole = (value: string | undefined): DashboardRole | null => {
+  const normalized = (value || '').trim().toLowerCase().replace('-', '_');
+  if (normalized === 'department') return 'department';
+  if (normalized === 'supervisor') return 'supervisor';
+  if (normalized === 'field_inspector') return 'field_inspector';
+  if (normalized === 'worker') return 'worker';
+  return null;
 };
 
 const parseApiDate = (value?: string): Date | null => {
@@ -406,6 +417,13 @@ const OfficialDashboard = () => {
   const user = authService.getCurrentUser();
   const currentUserId = (user?.id || '').trim();
   const role = toRole(user?.officialRole);
+  const explicitOfficialRole = normalizeOfficialRole(user?.officialRole);
+  const chatEligibleRole =
+    explicitOfficialRole === 'department' || explicitOfficialRole === 'supervisor'
+      ? explicitOfficialRole
+      : (user?.userType || '').trim().toLowerCase() === 'head_supervisor'
+        ? 'supervisor'
+        : null;
   const isTicketsPage = pathname.startsWith('/official/tickets');
   const isReadOnlyDashboard = pathname.startsWith('/official/dashboard');
 
@@ -441,6 +459,9 @@ const OfficialDashboard = () => {
   const [ticketDetailsDialogOpen, setTicketDetailsDialogOpen] = useState(false);
   const [ticketDetailsLoading, setTicketDetailsLoading] = useState(false);
   const [ticketDetails, setTicketDetails] = useState<Ticket | null>(null);
+  const [ticketChatDialogOpen, setTicketChatDialogOpen] = useState(false);
+  const [chatTicket, setChatTicket] = useState<Ticket | null>(null);
+  const [chatVisibleByTicket, setChatVisibleByTicket] = useState<Record<string, boolean>>({});
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -496,6 +517,29 @@ const OfficialDashboard = () => {
     }, 1000);
     return () => window.clearInterval(timerId);
   }, []);
+
+  useEffect(() => {
+    if (!isTicketsPage || !chatEligibleRole) {
+      setChatVisibleByTicket({});
+      return;
+    }
+    let cancelled = false;
+    const loadVisibility = async () => {
+      const rows = await Promise.all(
+        tickets.map(async (ticket) => {
+          const response = await ticketChatService.getOptions(ticket.id);
+          const visible = Boolean(response.success && response.data?.chatVisible);
+          return [ticket.id, visible] as const;
+        })
+      );
+      if (cancelled) return;
+      setChatVisibleByTicket(Object.fromEntries(rows));
+    };
+    void loadVisibility();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatEligibleRole, isTicketsPage, tickets]);
 
   const filteredTickets = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -994,6 +1038,11 @@ const OfficialDashboard = () => {
     await openTicketDetails(ticket);
   }, [isTicketsPage, navigate, openTicketDetails]);
 
+  const openTicketChat = useCallback((ticket: Ticket) => {
+    setChatTicket(ticket);
+    setTicketChatDialogOpen(true);
+  }, []);
+
   useEffect(() => {
     if (!isTicketsPage) return;
     const requestedTicket = (searchParams.get('ticket') || '').trim();
@@ -1117,10 +1166,20 @@ const OfficialDashboard = () => {
                   role === 'worker' ||
                   role === 'field_inspector');
               const showAssignmentSection = isTicketsPage && canAssignWorkers;
+              const showChatQuickActions =
+                isTicketsPage &&
+                Boolean(chatEligibleRole) &&
+                Boolean(chatVisibleByTicket[ticket.id]);
               const workerAssignmentHint = workers.length === 0 ? 'No workers available for assignment right now.' : '';
 
               return (
-                <div key={ticket.id} className="rounded-xl border border-border bg-card p-4 space-y-3">
+                <div
+                  key={ticket.id}
+                  className={cn(
+                    'relative rounded-xl border border-border bg-card p-4 space-y-3',
+                    showChatQuickActions && 'pb-14'
+                  )}
+                >
                   {!!ticket.reopenWarning && role !== 'department' && (
                     <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                       <div className="font-medium">
@@ -1400,6 +1459,26 @@ const OfficialDashboard = () => {
                       </div>
                     </div>
                   )}
+
+                  {showChatQuickActions && (
+                    <div className="absolute bottom-4 right-4">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-border bg-background shadow-sm transition-colors hover:bg-muted"
+                            aria-label="Open ticket chat actions"
+                          >
+                            <img src="/chat-icon.svg" alt="Chat actions" className="h-5 w-5 text-foreground" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => void openLogbook(ticket)}>Get Report</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => openTicketChat(ticket)}>Talk to Local Chat</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1595,6 +1674,17 @@ const OfficialDashboard = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      <TicketChatDialog
+        open={ticketChatDialogOpen}
+        onOpenChange={(nextOpen) => {
+          setTicketChatDialogOpen(nextOpen);
+          if (!nextOpen) {
+            setChatTicket(null);
+          }
+        }}
+        ticket={chatTicket}
+      />
     </>
   );
 };
