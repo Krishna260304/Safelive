@@ -34,3 +34,13 @@ __pycache__/
 Backend/images/*.jpg
 Backend/images/*.jpeg
 Backend/images/*.png
+
+node_modules/
+__pycache__/
+.env
+*.log
+dist/
+build/
+*.pyc
+venv/
+Frontend/.vite/
