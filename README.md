@@ -1,2 +1,1 @@
 # Safelive
-www.safelive.in
