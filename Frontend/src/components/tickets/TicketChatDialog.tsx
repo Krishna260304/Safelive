@@ -1,11 +1,12 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Download, Loader2, Paperclip, SendHorizontal, X } from 'lucide-react';
+import { Download, Loader2, Paperclip, SendHorizontal, X } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { API_CONFIG } from '@/config/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { authStorage } from '@/services/auth-storage';
 import {
   TicketChatMessage,
   TicketChatSession,
@@ -82,11 +83,11 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
 
-  const [selectedLocalUserId, setSelectedLocalUserId] = useState('');
+  const [selectedTargetRole, setSelectedTargetRole] = useState<TicketChatTargetRole | ''>('');
+  const [selectedTargetUserId, setSelectedTargetUserId] = useState('');
 
   const [messageDraft, setMessageDraft] = useState('');
   const [queuedFiles, setQueuedFiles] = useState<File[]>([]);
-  const [useAiAssist, setUseAiAssist] = useState(true);
 
   const [options, setOptions] = useState<
     | null
@@ -115,11 +116,26 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
 
   const selectedExistingSession = useMemo(() => {
     if (!options || options.existingSessions.length === 0) return null;
-    if (!selectedLocalUserId) return options.existingSessions[0];
-    return options.existingSessions.find((entry) => entry.localUserId === selectedLocalUserId) || options.existingSessions[0];
-  }, [options, selectedLocalUserId]);
+    return options.existingSessions[0];
+  }, [options]);
 
   const canSendMessages = Boolean(session) && !session?.endedAt;
+
+  const selectedTargetOptions = useMemo(() => {
+    if (!options || !selectedTargetRole) return [] as TicketChatUserOption[];
+    return selectedTargetRole === 'department' ? options.departments : options.supervisors;
+  }, [options, selectedTargetRole]);
+
+  const selectedTargetUser = useMemo(() => {
+    if (selectedTargetOptions.length === 0) return null;
+    if (selectedTargetUserId) {
+      const exactMatch = selectedTargetOptions.find((entry) => entry.id === selectedTargetUserId);
+      if (exactMatch) {
+        return exactMatch;
+      }
+    }
+    return selectedTargetOptions[0] || null;
+  }, [selectedTargetOptions, selectedTargetUserId]);
 
   const scrollToBottom = useCallback(() => {
     setTimeout(() => {
@@ -132,7 +148,8 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     setMessages([]);
     setMessageDraft('');
     setQueuedFiles([]);
-    setSelectedLocalUserId('');
+    setSelectedTargetRole('');
+    setSelectedTargetUserId('');
     setRealtimeConnected(false);
   }, []);
 
@@ -186,10 +203,53 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
       setOptions(payload);
 
       if (payload.initiateEnabled) {
-        setSelectedLocalUserId('');
+        const defaultTargetRole =
+          payload.defaultTargetRole ||
+          payload.preferredTargetRole ||
+          payload.targetRoles[0]?.value ||
+          '';
+        setSelectedTargetRole(defaultTargetRole);
+        const defaultTargetCandidates =
+          defaultTargetRole === 'department'
+            ? payload.departments
+            : defaultTargetRole === 'supervisor'
+              ? payload.supervisors
+              : [];
+        const preferredTargetId =
+          payload.preferredTargetRole === defaultTargetRole ? payload.preferredTargetUser?.id || '' : '';
+        const defaultTargetUserId =
+          (preferredTargetId && defaultTargetCandidates.find((entry) => entry.id === preferredTargetId)?.id) ||
+          defaultTargetCandidates[0]?.id ||
+          '';
+        setSelectedTargetUserId(defaultTargetUserId);
       } else {
+        setSelectedTargetRole('');
+        setSelectedTargetUserId('');
+
         const firstSession = payload.existingSessions[0];
-        setSelectedLocalUserId(firstSession?.localUserId || '');
+        if (payload.chatVisible && firstSession) {
+          setSessionLoading(true);
+          const sessionResponse = await ticketChatService.openSession(ticketRefId, {
+            targetRole: firstSession.targetRole,
+          });
+          if (cancelled) return;
+
+          if (!sessionResponse.success || !sessionResponse.data) {
+            setSessionLoading(false);
+            setOptionsLoading(false);
+            toast({
+              title: 'Unable to Open Chat',
+              description: sessionResponse.error || 'Could not open the received chat session.',
+              variant: 'destructive',
+            });
+            return;
+          }
+
+          setSession(sessionResponse.data);
+          await loadMessages(sessionResponse.data);
+          if (cancelled) return;
+          setSessionLoading(false);
+        }
       }
 
       setOptionsLoading(false);
@@ -200,7 +260,33 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     return () => {
       cancelled = true;
     };
-  }, [open, resetConversationState, ticketRefId, toast]);
+  }, [loadMessages, open, resetConversationState, ticketRefId, toast]);
+
+  useEffect(() => {
+    if (!options || !selectedTargetRole) {
+      setSelectedTargetUserId('');
+      return;
+    }
+
+    const candidateOptions = selectedTargetRole === 'department' ? options.departments : options.supervisors;
+    if (candidateOptions.length === 0) {
+      setSelectedTargetUserId('');
+      return;
+    }
+
+    const preferredTargetId =
+      options.preferredTargetRole === selectedTargetRole ? options.preferredTargetUser?.id || '' : '';
+
+    setSelectedTargetUserId((current) => {
+      if (current && candidateOptions.some((entry) => entry.id === current)) {
+        return current;
+      }
+      if (preferredTargetId && candidateOptions.some((entry) => entry.id === preferredTargetId)) {
+        return preferredTargetId;
+      }
+      return candidateOptions[0]?.id || '';
+    });
+  }, [options, selectedTargetRole]);
 
   useEffect(() => {
     if (!open || !ticketRefId || !session) return;
@@ -215,8 +301,10 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
   useEffect(() => {
     if (!open || !ticketRefId || !session) return;
     if (!API_CONFIG.WS_BASE_URL) return;
+    const token = authStorage.getToken();
+    if (!token) return;
 
-    const socket = new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents`);
+    const socket = new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents?token=${encodeURIComponent(token)}`);
 
     socket.onopen = () => setRealtimeConnected(true);
     socket.onerror = () => setRealtimeConnected(false);
@@ -246,7 +334,7 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     let payload: { targetRole: TicketChatTargetRole; targetUserId?: string; localUserId?: string };
 
     if (options.initiateEnabled) {
-      if (!options.preferredTargetRole || !options.preferredTargetUser?.id) {
+      if (!selectedTargetRole || !selectedTargetUser?.id) {
         toast({
           title: 'Official Unavailable',
           description: 'No responsible department or supervisor is available for this ticket right now.',
@@ -256,14 +344,14 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
         return;
       }
       payload = {
-        targetRole: options.preferredTargetRole,
-        targetUserId: options.preferredTargetUser.id,
+        targetRole: selectedTargetRole,
+        targetUserId: selectedTargetUser.id,
       };
     } else {
       if (!selectedExistingSession) {
         toast({
           title: 'No Chat Available',
-          description: 'Official chat remains hidden until a local user initiates chat.',
+          description: 'No chat has been received for this ticket yet.',
           variant: 'destructive',
         });
         setSessionLoading(false);
@@ -271,7 +359,6 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
       }
       payload = {
         targetRole: selectedExistingSession.targetRole,
-        localUserId: selectedExistingSession.localUserId,
       };
     }
 
@@ -306,7 +393,6 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     const response = await ticketChatService.sendMessage(ticketRefId, session.id, {
       message: messageDraft,
       files: queuedFiles,
-      useAiAssist,
     });
 
     if (!response.success) {
@@ -394,15 +480,13 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     }
   };
 
-  const localSessionOptions = options?.existingSessions || [];
-
   return (
     <Dialog open={open} onOpenChange={onDialogOpenChange}>
       <DialogContent className="sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>Ticket Chat {ticket ? `- ${displayTicketId(ticket)}` : ''}</DialogTitle>
           <DialogDescription>
-            Local chat is routed automatically to the official currently handling the ticket. Official chat appears only after local initiation.
+            Local users can choose the department employee or assigned supervisor for this ticket. Officials are taken directly to chats received from the local user.
           </DialogDescription>
         </DialogHeader>
 
@@ -410,83 +494,88 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
 
         {ticket && (
           <div className="space-y-4">
-            <div className="rounded-md border border-border bg-muted/20 p-3">
-              {optionsLoading && <div className="text-sm text-muted-foreground">Loading chat options...</div>}
+            {(optionsLoading || !options || options.initiateEnabled || !options.chatVisible || (!session && !options.initiateEnabled)) && (
+              <div className="rounded-md border border-border bg-muted/20 p-3">
+                {optionsLoading && <div className="text-sm text-muted-foreground">Loading chat options...</div>}
 
-              {!optionsLoading && options && !options.chatVisible && (
-                <div className="text-sm text-muted-foreground">
-                  No local-initiated chat yet. Official chat stays hidden until local user starts conversation.
-                </div>
-              )}
+                {!optionsLoading && options && !options.chatVisible && (
+                  <div className="text-sm text-muted-foreground">
+                    No chat has been received for this ticket yet. This official can only open chats started by the local user.
+                  </div>
+                )}
 
-              {!optionsLoading && options && options.chatVisible && (
-                <div className="grid gap-3 md:grid-cols-4">
-                  {options.initiateEnabled ? (
-                    <>
-                      <div>
-                        <label className="text-xs text-muted-foreground">Assigned Official</label>
-                        <Input
-                          value={options.preferredTargetUser ? userOptionLabel(options.preferredTargetUser) : 'Not assigned yet'}
-                          disabled
-                          className="mt-1"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-xs text-muted-foreground">Handling Role</label>
-                        <Input
-                          value={options.preferredTargetRole ? options.preferredTargetRole.replace('_', ' ') : 'N/A'}
-                          disabled
-                          className="mt-1"
-                        />
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div>
-                        <label className="text-xs text-muted-foreground">Local User</label>
+                {!optionsLoading && options && options.initiateEnabled && (
+                  <div className="grid gap-3 md:grid-cols-4">
+                    <div>
+                      <label className="text-xs text-muted-foreground">Chat Channel</label>
+                      {options.targetRoles.length > 1 ? (
                         <select
                           className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                          value={selectedLocalUserId}
-                          onChange={(event) => setSelectedLocalUserId(event.target.value)}
-                          disabled={sessionLoading || localSessionOptions.length === 0}
+                          value={selectedTargetRole}
+                          onChange={(event) => setSelectedTargetRole(event.target.value as TicketChatTargetRole)}
+                          disabled={sessionLoading}
                         >
-                          {localSessionOptions.map((entry) => (
-                            <option key={entry.id} value={entry.localUserId}>
-                              {entry.localUserName}
+                          {options.targetRoles.map((entry) => (
+                            <option key={entry.value} value={entry.value}>
+                              {entry.label}
                             </option>
                           ))}
                         </select>
-                      </div>
-
-                      <div>
-                        <label className="text-xs text-muted-foreground">Channel</label>
+                      ) : (
                         <Input
-                          value={selectedExistingSession?.targetRole?.replace('_', ' ') || 'N/A'}
+                          value={options.targetRoles[0]?.label || 'N/A'}
                           disabled
                           className="mt-1"
                         />
-                      </div>
-                    </>
-                  )}
+                      )}
+                    </div>
 
-                  <div className="md:col-span-2 flex items-end">
-                    <Button
-                      className="h-10"
-                      onClick={() => void handleStartOrOpenChat()}
-                      disabled={
-                        sessionLoading ||
-                        (options.initiateEnabled && (!options.preferredTargetRole || !options.preferredTargetUser?.id)) ||
-                        (!options.initiateEnabled && !selectedExistingSession)
-                      }
-                    >
-                      {sessionLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                      {session ? 'Resume Chat' : options.initiateEnabled ? 'Start Chat' : 'Open Chat'}
-                    </Button>
+                    <div>
+                      <label className="text-xs text-muted-foreground">
+                        {selectedTargetRole === 'department' ? 'Department Employee' : 'Assigned Supervisor'}
+                      </label>
+                      {selectedTargetRole === 'department' && selectedTargetOptions.length > 0 ? (
+                        <select
+                          className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                          value={selectedTargetUserId}
+                          onChange={(event) => setSelectedTargetUserId(event.target.value)}
+                          disabled={sessionLoading}
+                        >
+                          {selectedTargetOptions.map((entry) => (
+                            <option key={entry.id} value={entry.id}>
+                              {userOptionLabel(entry)}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <Input
+                          value={selectedTargetUser ? userOptionLabel(selectedTargetUser) : 'Not assigned yet'}
+                          disabled
+                          className="mt-1"
+                        />
+                      )}
+                    </div>
+
+                    <div className="md:col-span-2 flex items-end">
+                      <Button
+                        className="h-10"
+                        onClick={() => void handleStartOrOpenChat()}
+                        disabled={sessionLoading || !selectedTargetRole || !selectedTargetUser?.id}
+                      >
+                        {sessionLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                        {session ? 'Resume Chat' : 'Start Chat'}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
+                )}
+
+                {!optionsLoading && options && !options.initiateEnabled && options.chatVisible && !session && (
+                  <div className="text-sm text-muted-foreground">
+                    {sessionLoading ? 'Opening received chat...' : 'Unable to load the received chat.'}
+                  </div>
+                )}
+              </div>
+            )}
 
             {session && (
               <div className="space-y-3">
@@ -531,7 +620,6 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                   <div className="space-y-3">
                     {messages.map((entry) => {
                       const ownMessage = (entry.senderId || '').trim() === options?.currentUserId;
-                      const assistantMessage = (entry.messageType || '').trim() === 'assistant';
                       return (
                         <div key={entry.id} className={cn('flex', ownMessage ? 'justify-end' : 'justify-start')}>
                           <div
@@ -539,13 +627,10 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                               'max-w-[85%] rounded-lg border px-3 py-2 text-sm',
                               ownMessage
                                 ? 'border-primary bg-primary text-primary-foreground'
-                                : assistantMessage
-                                  ? 'border-accent bg-accent/20 text-foreground'
-                                  : 'border-border bg-card text-foreground'
+                                : 'border-border bg-card text-foreground'
                             )}
                           >
                             <div className={cn('mb-1 text-[11px]', ownMessage ? 'text-primary-foreground/80' : 'text-muted-foreground')}>
-                              {assistantMessage && <Bot className="mr-1 inline h-3 w-3" />}
                               {entry.senderName || 'User'}
                               {entry.senderRole ? ` (${String(entry.senderRole).replace(/_/g, ' ')})` : ''} | {formatTime(entry.createdAt)}
                             </div>
@@ -642,16 +727,6 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                         <Paperclip className="mr-1 h-4 w-4" />
                         Upload Photo/Video
                       </Button>
-
-                      <label className="flex items-center gap-1 text-xs text-muted-foreground">
-                        <input
-                          type="checkbox"
-                          checked={useAiAssist}
-                          onChange={(event) => setUseAiAssist(event.target.checked)}
-                          disabled={!canSendMessages || sending}
-                        />
-                        AI Assist
-                      </label>
                     </div>
 
                     <Button type="button" onClick={() => void handleSendMessage()} disabled={!canSendMessages || sending}>

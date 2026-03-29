@@ -245,17 +245,24 @@ const Dashboard = () => {
     };
   }, []);
 
+  const visibleIncidents = useMemo(() => {
+    if (!isLocalUser) return incidents;
+    const currentUserId = String(currentUser?.id || '').trim();
+    if (!currentUserId) return [];
+    return incidents.filter((incident) => String(incident.reporterId || '').trim() === currentUserId);
+  }, [currentUser?.id, incidents, isLocalUser]);
+
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
-    if (!term) return incidents;
-    return incidents.filter((i) =>
+    if (!term) return visibleIncidents;
+    return visibleIncidents.filter((i) =>
       [i.title, i.description, i.category, i.location, i.status]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
         .includes(term)
     );
-  }, [incidents, query]);
+  }, [query, visibleIncidents]);
 
   const selected = filtered.find((i) => i.id === selectedId) || filtered[0] || null;
   const selectedEditWindow = useMemo(() => {
@@ -272,13 +279,13 @@ const Dashboard = () => {
   }, [isLocalUser, nowMs, selected]);
 
   const stats = useMemo(() => {
-    const total = incidents.length;
-    const open = incidents.filter((i) => i.status === 'open' || i.status === 'pending').length;
-    const inProgress = incidents.filter((i) => i.status === 'in_progress').length;
-    const resolved = incidents.filter((i) => i.status === 'resolved').length;
-    const high = incidents.filter((i) => i.priority === 'high').length;
+    const total = visibleIncidents.length;
+    const open = visibleIncidents.filter((i) => i.status === 'open' || i.status === 'pending').length;
+    const inProgress = visibleIncidents.filter((i) => i.status === 'in_progress').length;
+    const resolved = visibleIncidents.filter((i) => i.status === 'resolved').length;
+    const high = visibleIncidents.filter((i) => i.priority === 'high').length;
     return { total, open, inProgress, resolved, high };
-  }, [incidents]);
+  }, [visibleIncidents]);
 
   const statusData = useMemo(() => {
     return [
@@ -290,17 +297,17 @@ const Dashboard = () => {
 
   const categoryData = useMemo(() => {
     const categories: Record<string, number> = {};
-    incidents.forEach((i) => {
+    visibleIncidents.forEach((i) => {
       categories[i.category] = (categories[i.category] || 0) + 1;
     });
     return Object.entries(categories)
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
-  }, [incidents]);
+  }, [visibleIncidents]);
 
   const timelineData = useMemo(() => {
     const dates: Record<string, number> = {};
-    incidents.forEach((i) => {
+    visibleIncidents.forEach((i) => {
       const parsed = parseApiDate(i.createdAt);
       if (!parsed) return;
       const date = parsed.toLocaleDateString('en-CA', {
@@ -314,7 +321,7 @@ const Dashboard = () => {
     return Object.entries(dates)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, count]) => ({ date, count }));
-  }, [incidents]);
+  }, [visibleIncidents]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);

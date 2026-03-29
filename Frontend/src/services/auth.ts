@@ -1,5 +1,6 @@
 import { apiClient, ApiResponse } from './api';
 import { API_ENDPOINTS } from '@/config/api';
+import { authStorage } from './auth-storage';
 
 export type OfficialRole = 'department' | 'supervisor' | 'field_inspector' | 'worker';
 
@@ -59,15 +60,13 @@ export interface ForgotPasswordData {
 
 
 export const authService = {
-  
-
   async login(data: LoginData): Promise<ApiResponse<LoginResponse>> {
     const response = await apiClient.post<LoginResponse>(API_ENDPOINTS.AUTH.LOGIN, data);
     
     if (response.success && (response.data as AuthResponse | undefined)?.token) {
       const auth = response.data as AuthResponse;
-      localStorage.setItem('auth_token', auth.token);
-      localStorage.setItem('user', JSON.stringify(auth.user));
+      authStorage.setToken(auth.token);
+      authStorage.setUser(auth.user);
     }
     
     return response;
@@ -77,21 +76,19 @@ export const authService = {
     const response = await apiClient.post<AuthResponse>(API_ENDPOINTS.AUTH.VERIFY_OTP, { challengeId, otp });
 
     if (response.success && response.data?.token) {
-      localStorage.setItem('auth_token', response.data.token);
-      localStorage.setItem('user', JSON.stringify(response.data.user));
+      authStorage.setToken(response.data.token);
+      authStorage.setUser(response.data.user);
     }
 
     return response;
   },
 
-  
-
   async register(data: RegisterData): Promise<ApiResponse<AuthResponse>> {
     const response = await apiClient.post<AuthResponse>(API_ENDPOINTS.AUTH.REGISTER, data);
     
     if (response.success && response.data?.token) {
-      localStorage.setItem('auth_token', response.data.token);
-      localStorage.setItem('user', JSON.stringify(response.data.user));
+      authStorage.setToken(response.data.token);
+      authStorage.setUser(response.data.user);
     }
     
     return response;
@@ -122,7 +119,7 @@ export const authService = {
   async confirmEnable2fa(challengeId: string, otp: string): Promise<ApiResponse<AuthResponse['user']>> {
     const response = await apiClient.post<AuthResponse['user']>(API_ENDPOINTS.AUTH.TWO_FA_ENABLE_CONFIRM, { challengeId, otp });
     if (response.success && response.data) {
-      localStorage.setItem('user', JSON.stringify(response.data));
+      authStorage.setUser(response.data);
     }
     return response;
   },
@@ -139,50 +136,39 @@ export const authService = {
   async confirmDisable2fa(challengeId: string, otp: string): Promise<ApiResponse<AuthResponse['user']>> {
     const response = await apiClient.post<AuthResponse['user']>(API_ENDPOINTS.AUTH.TWO_FA_DISABLE_CONFIRM, { challengeId, otp });
     if (response.success && response.data) {
-      localStorage.setItem('user', JSON.stringify(response.data));
+      authStorage.setUser(response.data);
     }
     return response;
   },
 
-  
-
   async logout(): Promise<void> {
     await apiClient.post(API_ENDPOINTS.AUTH.LOGOUT);
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
+    authStorage.clear();
   },
-
-  
 
   async forgotPassword(data: ForgotPasswordData): Promise<ApiResponse<{ message: string }>> {
     return apiClient.post(API_ENDPOINTS.AUTH.FORGOT_PASSWORD, data);
   },
 
-  
-
   async resetPassword(token: string, password: string): Promise<ApiResponse<{ message: string }>> {
     return apiClient.post(API_ENDPOINTS.AUTH.RESET_PASSWORD, { token, password });
   },
 
-  
-
   getCurrentUser() {
-    const userStr = localStorage.getItem('user');
+    const userStr = authStorage.getUser();
     if (!userStr) {
       return null;
     }
     try {
       return JSON.parse(userStr);
     } catch {
-      localStorage.removeItem('user');
+      authStorage.clearUser();
       return null;
     }
   },
 
-  
-
   isAuthenticated(): boolean {
-    return !!localStorage.getItem('auth_token');
+    return !!authStorage.getToken();
   },
 };
 

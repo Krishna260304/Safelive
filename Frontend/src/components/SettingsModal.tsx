@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
+import { authStorage } from '@/services/auth-storage';
 import { usersService } from '@/services/users';
 
 interface SettingsModalProps {
@@ -112,7 +113,7 @@ export const SettingsModal = ({ open, onOpenChange, isOfficial = false }: Settin
             pincode: response.data.pincode || '',
           });
           setTwoFactorEnabled(!!response.data.twoFactorEnabled);
-          localStorage.setItem('user', JSON.stringify(response.data));
+          authStorage.setUser(response.data);
         }
       } finally {
         setProfileLoading(false);
@@ -133,7 +134,7 @@ export const SettingsModal = ({ open, onOpenChange, isOfficial = false }: Settin
       });
 
       if (response.success && response.data) {
-        localStorage.setItem('user', JSON.stringify(response.data));
+        authStorage.setUser(response.data);
         toast({
           title: 'Saved',
           description: 'Your profile details were updated.',

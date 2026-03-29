@@ -1,4 +1,4 @@
-import { ReactNode, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell,
@@ -16,7 +16,10 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SettingsModal } from '@/components/SettingsModal';
+import { API_CONFIG } from '@/config/api';
+import { authStorage } from '@/services/auth-storage';
 import { authService } from '@/services/auth';
+import { ticketChatService } from '@/services/ticket-chat';
 import { cn } from '@/lib/utils';
 
 interface OfficialDashboardLayoutProps {
@@ -47,9 +50,11 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [receivedChatCount, setReceivedChatCount] = useState(0);
 
   const user = authService.getCurrentUser();
   const role = toOfficialRole(user?.officialRole);
+  const canAccessChatAlerts = role === 'department' || role === 'supervisor';
   const userName = user?.fullName || user?.name || user?.email || 'Official';
   const userDept = 
     (role === 'supervisor' || role === 'field_inspector') 
@@ -81,6 +86,74 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
 
   const activeNavLabel = navItems.find((item) => location.pathname.startsWith(item.path))?.label || 'Dashboard';
 
+  const fetchReceivedChatCount = useCallback(async (): Promise<number> => {
+    if (!canAccessChatAlerts) {
+      return 0;
+    }
+
+    const response = await ticketChatService.getInboxSummary();
+    if (!response.success || !response.data) {
+      return 0;
+    }
+
+    return Math.max(0, Number(response.data.receivedChatsCount || 0));
+  }, [canAccessChatAlerts]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!canAccessChatAlerts) {
+      setReceivedChatCount(0);
+      return;
+    }
+
+    const refreshCount = async () => {
+      const nextCount = await fetchReceivedChatCount();
+      if (!cancelled) {
+        setReceivedChatCount(nextCount);
+      }
+    };
+
+    void refreshCount();
+    const intervalId = window.setInterval(() => {
+      void refreshCount();
+    }, 30000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [canAccessChatAlerts, fetchReceivedChatCount]);
+
+  useEffect(() => {
+    if (!canAccessChatAlerts || !API_CONFIG.WS_BASE_URL) return;
+    const token = authStorage.getToken();
+    if (!token) return;
+
+    let active = true;
+    const socket = new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents?token=${encodeURIComponent(token)}`);
+
+    socket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload?.type !== 'TICKET_CHAT_SYNC') return;
+
+        void fetchReceivedChatCount().then((nextCount) => {
+          if (active) {
+            setReceivedChatCount(nextCount);
+          }
+        });
+      } catch {
+        return;
+      }
+    };
+
+    return () => {
+      active = false;
+      socket.close();
+    };
+  }, [canAccessChatAlerts, fetchReceivedChatCount]);
+
   const handleLogout = async () => {
     await authService.logout();
     navigate('/official/login');
@@ -92,6 +165,12 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
       return;
     }
     setIsSettingsOpen(true);
+  };
+
+  const handleAlertsClick = () => {
+    if (canAccessChatAlerts) {
+      navigate('/official/alerts');
+    }
   };
 
   return (
@@ -187,8 +266,22 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
             <span className="rounded-full bg-accent/10 px-2 py-1 text-xs font-medium text-accent">{roleLabelMap[role]}</span>
           </div>
           <div className="flex items-center gap-4">
-            <button className="rounded-lg p-2 transition-colors hover:bg-muted">
+            <button
+              type="button"
+              onClick={handleAlertsClick}
+              className="relative rounded-lg p-2 transition-colors hover:bg-muted"
+              aria-label={
+                receivedChatCount > 0
+                  ? `${receivedChatCount} received chats`
+                  : 'No received chats'
+              }
+            >
               <Bell className="h-5 w-5 text-muted-foreground" />
+              {receivedChatCount > 0 && (
+                <span className="absolute -right-1 -top-1 inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+                  {receivedChatCount > 99 ? '99+' : receivedChatCount}
+                </span>
+              )}
             </button>
             <div className="relative">
               <button

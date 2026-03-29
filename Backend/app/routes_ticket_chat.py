@@ -15,7 +15,6 @@ from app.auth import get_current_user, is_official_account
 from app.config.settings import settings
 from app.database import incident_logs, incidents, ticket_chat_messages, ticket_chat_sessions, tickets, users
 from app.roles import normalize_official_role
-from app.services.logbook_sentence_ai import generate_logbook_sentence
 from app.services.ws_manager import manager
 from app.utils import serialize_doc, serialize_list, to_object_id
 
@@ -47,12 +46,6 @@ def _now_dt() -> datetime:
 def _retention_expires_at(now: datetime | None = None) -> datetime:
     ref = now or _now_dt()
     return ref + timedelta(hours=CHAT_RETENTION_HOURS)
-
-
-def _parse_bool(value: str | bool | None) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_role(value: str | None) -> str:
@@ -234,7 +227,7 @@ def _dedupe_user_options(options: list[dict]) -> list[dict]:
     return deduped
 
 
-def _resolve_department_options(ticket_doc: dict, current_user: dict) -> list[dict]:
+def _resolve_department_options(ticket_doc: dict, current_user: dict, directory_limit: int | None = 16) -> list[dict]:
     options: list[dict] = []
     current_role = _normalize_role(current_user.get("officialRole"))
     current_department = str(current_user.get("department") or "").strip()
@@ -268,14 +261,19 @@ def _resolve_department_options(ticket_doc: dict, current_user: dict) -> list[di
     if current_department:
         query["department"] = current_department
 
-    cursor = users.find(query, {"name": 1, "officialRole": 1, "department": 1, "email": 1, "phone": 1}).limit(16)
-    for row in cursor:
-        options.append(_option_from_user_doc(row, ROLE_DEPARTMENT))
+    if directory_limit is None:
+        cursor = users.find(query, {"name": 1, "officialRole": 1, "department": 1, "email": 1, "phone": 1})
+        for row in cursor:
+            options.append(_option_from_user_doc(row, ROLE_DEPARTMENT))
+    elif directory_limit > 0:
+        cursor = users.find(query, {"name": 1, "officialRole": 1, "department": 1, "email": 1, "phone": 1}).limit(directory_limit)
+        for row in cursor:
+            options.append(_option_from_user_doc(row, ROLE_DEPARTMENT))
 
     return _dedupe_user_options(options)
 
 
-def _resolve_supervisor_options(ticket_doc: dict, current_user: dict) -> list[dict]:
+def _resolve_supervisor_options(ticket_doc: dict, current_user: dict, directory_limit: int = 20) -> list[dict]:
     options: list[dict] = []
     current_role = _normalize_role(current_user.get("officialRole"))
     current_department = str(current_user.get("department") or "").strip()
@@ -309,9 +307,10 @@ def _resolve_supervisor_options(ticket_doc: dict, current_user: dict) -> list[di
     if current_department:
         query["department"] = current_department
 
-    cursor = users.find(query, {"name": 1, "officialRole": 1, "department": 1, "email": 1, "phone": 1}).limit(20)
-    for row in cursor:
-        options.append(_option_from_user_doc(row, ROLE_SUPERVISOR))
+    if directory_limit > 0:
+        cursor = users.find(query, {"name": 1, "officialRole": 1, "department": 1, "email": 1, "phone": 1}).limit(directory_limit)
+        for row in cursor:
+            options.append(_option_from_user_doc(row, ROLE_SUPERVISOR))
 
     return _dedupe_user_options(options)
 
@@ -507,6 +506,15 @@ def _refresh_retention(session_id: str, now_iso: str, expires_at: datetime):
     ticket_chat_messages.update_many({"sessionId": session_id}, {"$set": {"expiresAt": expires_at}})
 
 
+def _is_visible_chat_message(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if bool(row.get("aiGenerated")):
+        return False
+    message_type = str(row.get("messageType") or "").strip().lower()
+    return message_type != "assistant"
+
+
 def _normalize_upload_extension(content_type: str, original_name: str | None) -> str:
     suffix = Path(str(original_name or "")).suffix.strip().lower()
     if suffix and 1 <= len(suffix) <= 10:
@@ -652,36 +660,6 @@ def _transcript_pdf_bytes(ticket_doc: dict, session_doc: dict, message_rows: lis
     return _build_pdf(pages)
 
 
-def _ai_assist_reply(ticket_doc: dict, session_doc: dict, user_message: str) -> str:
-    details = {
-        "ticketId": ticket_doc.get("ticketId") or str(ticket_doc.get("_id") or ""),
-        "ticketStatus": str(ticket_doc.get("status") or "open").replace("_", " "),
-        "targetRole": session_doc.get("targetRole"),
-        "localUserName": session_doc.get("localUserName"),
-        "userMessage": user_message[:220],
-    }
-    actor = {"name": "SafeLive AI Assistant", "officialRole": "department"}
-
-    sentence = ""
-    try:
-        sentence = generate_logbook_sentence("ticket_chat_ai_assist", details, actor)
-    except Exception:
-        sentence = ""
-
-    clean_sentence = " ".join(str(sentence or "").split()).strip()
-    if not clean_sentence:
-        status_label = str(ticket_doc.get("status") or "open").replace("_", " ")
-        clean_sentence = (
-            f"AI Assist: Ticket is currently {status_label}. Share clear location details and attach photos/videos "
-            "for faster verification."
-        )
-    if not clean_sentence.lower().startswith("ai assist"):
-        clean_sentence = f"AI Assist: {clean_sentence}"
-    if "next step" not in clean_sentence.lower():
-        clean_sentence = f"{clean_sentence} Next step: confirm ETA and blockers."
-    return clean_sentence
-
-
 def _existing_sessions_for_user(ticket_object_id: str, role: str, current_user_id: str, reporter_id: str | None) -> list[dict]:
     query: dict[str, Any] = {
         "ticketId": ticket_object_id,
@@ -697,6 +675,32 @@ def _existing_sessions_for_user(ticket_object_id: str, role: str, current_user_i
     return list(ticket_chat_sessions.find(query).sort("createdAt", -1))
 
 
+@router.get("/chat/inbox-summary")
+def get_ticket_chat_inbox_summary(current_user: dict = Depends(get_current_user)):
+    role = _resolve_chat_role(current_user)
+    current_user_id = _clean_user_id(current_user.get("id"))
+    if not current_user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    query: dict[str, Any] = {
+        "initiatedBy": ROLE_LOCAL,
+        "endedAt": {"$exists": False},
+    }
+    if role == ROLE_LOCAL:
+        query["localUserId"] = current_user_id
+    else:
+        query["officialUserId"] = current_user_id
+
+    received_chats_count = ticket_chat_sessions.count_documents(query)
+
+    return {
+        "success": True,
+        "data": {
+            "receivedChatsCount": received_chats_count,
+        },
+    }
+
+
 @router.get("/{ticket_ref}/chat/options")
 def get_ticket_chat_options(ticket_ref: str, current_user: dict = Depends(get_current_user)):
     role = _resolve_chat_role(current_user)
@@ -709,8 +713,10 @@ def get_ticket_chat_options(ticket_ref: str, current_user: dict = Depends(get_cu
     if not _can_access_chat(ticket_doc, current_user, role, reporter):
         raise HTTPException(status_code=403, detail="Access denied")
 
-    departments = _resolve_department_options(ticket_doc, current_user)
-    supervisors = _resolve_supervisor_options(ticket_doc, current_user)
+    department_directory_limit = None if role == ROLE_LOCAL else 16
+    supervisor_directory_limit = 0 if role == ROLE_LOCAL else 20
+    departments = _resolve_department_options(ticket_doc, current_user, directory_limit=department_directory_limit)
+    supervisors = _resolve_supervisor_options(ticket_doc, current_user, directory_limit=supervisor_directory_limit)
     allowed_targets = _allowed_target_roles(role, departments, supervisors)
     preferred_target = _resolve_preferred_target(ticket_doc, departments, supervisors)
 
@@ -759,21 +765,40 @@ def open_ticket_chat_session(
     if not local_user_id:
         raise HTTPException(status_code=400, detail="Local reporter details are unavailable for this ticket")
 
-    departments = _resolve_department_options(ticket_doc, current_user)
-    supervisors = _resolve_supervisor_options(ticket_doc, current_user)
+    department_directory_limit = None if role == ROLE_LOCAL else 16
+    supervisor_directory_limit = 0 if role == ROLE_LOCAL else 20
+    departments = _resolve_department_options(ticket_doc, current_user, directory_limit=department_directory_limit)
+    supervisors = _resolve_supervisor_options(ticket_doc, current_user, directory_limit=supervisor_directory_limit)
     preferred_target = _resolve_preferred_target(ticket_doc, departments, supervisors)
 
     if role != ROLE_LOCAL:
         target_role = _normalize_role(payload.targetRole)
         if target_role not in TARGET_ROLES:
             raise HTTPException(status_code=400, detail="targetRole must be department or supervisor")
-        local_target_id = _clean_user_id(payload.localUserId) or local_user_id
-        existing = ticket_chat_sessions.find_one(_active_session_selector(ticket_object_id, current_user_id, local_target_id))
+        if target_role != role:
+            raise HTTPException(status_code=403, detail="Officials can open only chats assigned to their own role")
+        existing = ticket_chat_sessions.find_one(
+            {
+                **_active_session_selector(ticket_object_id, current_user_id, local_user_id),
+                "targetRole": target_role,
+            }
+        )
         if not existing:
             raise HTTPException(status_code=404, detail="No local-initiated chat available for this ticket")
         return {"success": True, "data": serialize_doc(existing)}
 
-    target_official = preferred_target
+    requested_target_role = _normalize_role(payload.targetRole)
+    requested_target_user_id = _clean_user_id(payload.targetUserId)
+    if requested_target_role in TARGET_ROLES:
+        target_official = _resolve_target_official(
+            target_role=requested_target_role,
+            target_user_id=requested_target_user_id,
+            current_user=current_user,
+            departments=departments,
+            supervisors=supervisors,
+        )
+    else:
+        target_official = preferred_target
     target_role = _normalize_role((target_official or {}).get("role"))
     if not target_official or target_role not in TARGET_ROLES:
         raise HTTPException(status_code=400, detail="No responsible department or supervisor is available for this ticket")
@@ -838,7 +863,11 @@ def list_ticket_chat_messages(
     session_doc = _get_session_doc(ticket_object_id, session_id)
     _require_session_participant(session_doc, current_user)
 
-    rows = list(ticket_chat_messages.find({"sessionId": session_id}).sort("createdAt", 1))
+    rows = [
+        row
+        for row in ticket_chat_messages.find({"sessionId": session_id}).sort("createdAt", 1)
+        if _is_visible_chat_message(row)
+    ]
     return {"success": True, "data": {"session": serialize_doc(session_doc), "messages": serialize_list(rows)}}
 
 
@@ -847,7 +876,6 @@ async def create_ticket_chat_message(
     ticket_ref: str,
     session_id: str,
     message: str = Form(default=""),
-    useAiAssist: str = Form(default="false"),
     files: list[UploadFile] = File(default=[]),
     current_user: dict = Depends(get_current_user),
 ):
@@ -899,25 +927,6 @@ async def create_ticket_chat_message(
     }
     inserted = ticket_chat_messages.insert_one(user_message_doc)
     created_docs.append(ticket_chat_messages.find_one({"_id": inserted.inserted_id}) or user_message_doc)
-
-    if _parse_bool(useAiAssist) and text:
-        ai_text = _ai_assist_reply(ticket_doc, session_doc, text)
-        ai_message_doc = {
-            "ticketId": ticket_object_id,
-            "sessionId": session_id,
-            "messageType": "assistant",
-            "message": ai_text,
-            "attachments": [],
-            "senderId": "safelive_ai_assistant",
-            "senderName": "SafeLive AI",
-            "senderRole": "assistant",
-            "aiGenerated": True,
-            "createdAt": now_iso,
-            "updatedAt": now_iso,
-            "expiresAt": expires_at,
-        }
-        inserted_ai = ticket_chat_messages.insert_one(ai_message_doc)
-        created_docs.append(ticket_chat_messages.find_one({"_id": inserted_ai.inserted_id}) or ai_message_doc)
 
     _refresh_retention(session_id, now_iso, expires_at)
 
@@ -1004,7 +1013,11 @@ def download_ticket_chat_transcript_pdf(
     session_doc = _get_session_doc(ticket_object_id, session_id)
     _require_session_participant(session_doc, current_user)
 
-    message_rows = list(ticket_chat_messages.find({"sessionId": session_id}).sort("createdAt", 1))
+    message_rows = [
+        row
+        for row in ticket_chat_messages.find({"sessionId": session_id}).sort("createdAt", 1)
+        if _is_visible_chat_message(row)
+    ]
     pdf_bytes = _transcript_pdf_bytes(ticket_doc, session_doc, message_rows)
 
     ticket_public_id = str(ticket_doc.get("ticketId") or ticket_doc.get("_id") or "ticket").strip()

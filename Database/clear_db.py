@@ -14,22 +14,16 @@ def clear_database():
     client = MongoClient(settings.MONGO_URL)
     db = client[settings.DB_NAME]
     
+    preserved_collections = {"users"}
     collections_to_clear = [
-        "incidents",
-        "tickets",
-        "messages",
-        "password_resets",
-        "otp_challenges",
-        "incident_logs",
-        "counters"
+        name for name in db.list_collection_names() if name not in preserved_collections
     ]
     
     print(f"Connecting to database: {settings.DB_NAME}")
     print("=" * 60)
     
-    for collection_name in collections_to_clear:
+    for collection_name in sorted(collections_to_clear):
         collection = db[collection_name]
-        count_before = collection.count_documents({})
         result = collection.delete_many({})
         print(f"✓ Cleared {collection_name}: {result.deleted_count} documents removed")
     

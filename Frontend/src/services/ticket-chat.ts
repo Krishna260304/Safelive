@@ -1,5 +1,6 @@
 import { apiClient, ApiResponse } from './api';
 import { API_CONFIG, API_ENDPOINTS } from '@/config/api';
+import { authStorage } from './auth-storage';
 
 export type TicketChatTargetRole = 'department' | 'supervisor';
 
@@ -31,6 +32,10 @@ export interface TicketChatOptions {
   initiateEnabled: boolean;
   chatVisible: boolean;
   retentionHours: number;
+}
+
+export interface TicketChatInboxSummary {
+  receivedChatsCount: number;
 }
 
 export interface TicketChatSessionParticipant {
@@ -94,7 +99,6 @@ export interface TicketChatSessionOpenPayload {
 export interface TicketChatSendPayload {
   message?: string;
   files?: File[];
-  useAiAssist?: boolean;
 }
 
 const ABSOLUTE_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//;
@@ -170,6 +174,10 @@ const parseFilenameFromDisposition = (value: string | null): string | null => {
 };
 
 export const ticketChatService = {
+  async getInboxSummary(): Promise<ApiResponse<TicketChatInboxSummary>> {
+    return apiClient.get<TicketChatInboxSummary>(API_ENDPOINTS.TICKETS.CHAT_INBOX_SUMMARY);
+  },
+
   async getOptions(ticketId: string): Promise<ApiResponse<TicketChatOptions>> {
     return apiClient.get<TicketChatOptions>(API_ENDPOINTS.TICKETS.CHAT_OPTIONS(ticketId));
   },
@@ -205,12 +213,11 @@ export const ticketChatService = {
     const endpoint = API_ENDPOINTS.TICKETS.CHAT_MESSAGES(ticketId, sessionId);
     const formData = new FormData();
     formData.append('message', (payload.message || '').trim());
-    formData.append('useAiAssist', String(Boolean(payload.useAiAssist)));
     for (const file of payload.files || []) {
       formData.append('files', file);
     }
 
-    const token = localStorage.getItem('auth_token');
+    const token = authStorage.getToken();
     try {
       const response = await fetch(`${API_CONFIG.BASE_URL}${endpoint}`, {
         method: 'POST',
@@ -257,7 +264,7 @@ export const ticketChatService = {
   },
 
   async downloadTranscript(ticketId: string, sessionId: string): Promise<ApiResponse<{ filename: string }>> {
-    const token = localStorage.getItem('auth_token');
+    const token = authStorage.getToken();
     if (!token) {
       return { success: false, error: 'Authentication required' };
     }

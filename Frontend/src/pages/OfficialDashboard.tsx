@@ -27,7 +27,6 @@ import { useTickets } from '@/hooks/use-data';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
 import { incidentService } from '@/services/incidents';
-import { ticketChatService } from '@/services/ticket-chat';
 import { Ticket, TicketLogEntry, ticketService } from '@/services/tickets';
 import { ManagedOfficialAccount, usersService, WorkerAccount } from '@/services/users';
 import { cn } from '@/lib/utils';
@@ -461,7 +460,6 @@ const OfficialDashboard = () => {
   const [ticketDetails, setTicketDetails] = useState<Ticket | null>(null);
   const [ticketChatDialogOpen, setTicketChatDialogOpen] = useState(false);
   const [chatTicket, setChatTicket] = useState<Ticket | null>(null);
-  const [chatVisibleByTicket, setChatVisibleByTicket] = useState<Record<string, boolean>>({});
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -517,29 +515,6 @@ const OfficialDashboard = () => {
     }, 1000);
     return () => window.clearInterval(timerId);
   }, []);
-
-  useEffect(() => {
-    if (!isTicketsPage || !chatEligibleRole) {
-      setChatVisibleByTicket({});
-      return;
-    }
-    let cancelled = false;
-    const loadVisibility = async () => {
-      const rows = await Promise.all(
-        tickets.map(async (ticket) => {
-          const response = await ticketChatService.getOptions(ticket.id);
-          const visible = Boolean(response.success && response.data?.chatVisible);
-          return [ticket.id, visible] as const;
-        })
-      );
-      if (cancelled) return;
-      setChatVisibleByTicket(Object.fromEntries(rows));
-    };
-    void loadVisibility();
-    return () => {
-      cancelled = true;
-    };
-  }, [chatEligibleRole, isTicketsPage, tickets]);
 
   const filteredTickets = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -1166,10 +1141,7 @@ const OfficialDashboard = () => {
                   role === 'worker' ||
                   role === 'field_inspector');
               const showAssignmentSection = isTicketsPage && canAssignWorkers;
-              const showChatQuickActions =
-                isTicketsPage &&
-                Boolean(chatEligibleRole) &&
-                Boolean(chatVisibleByTicket[ticket.id]);
+              const showChatQuickActions = isTicketsPage && Boolean(chatEligibleRole);
               const workerAssignmentHint = workers.length === 0 ? 'No workers available for assignment right now.' : '';
 
               return (

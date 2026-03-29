@@ -138,6 +138,8 @@ class Settings:
     INSPECTOR_REMINDER_INTERVAL_SECONDS = _env_int("INSPECTOR_REMINDER_INTERVAL_SECONDS", 300)
     CORS_ORIGINS = _split_env_list(os.getenv("CORS_ORIGINS")) or [
         "https://safelive.in",
+        "https://www.safelive.in",
+        "http://www.safelive.in",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:8080",

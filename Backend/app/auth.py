@@ -47,7 +47,7 @@ def decode_token(token: str) -> dict:
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
+def get_user_from_token(token: str) -> dict:
     payload = decode_token(token)
     user_id = payload.get("sub")
     email = payload.get("email")
@@ -72,6 +72,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     if data:
         data.pop("password", None)
     return data
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    return get_user_from_token(token)
 
 def get_official_user(current_user: dict = Depends(get_current_user)):
     if not is_official_account(current_user):

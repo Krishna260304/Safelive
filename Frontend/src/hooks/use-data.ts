@@ -9,21 +9,31 @@ import {
   TrendPoint,
 } from '@/services/analytics';
 import { publicService, PublicSummary } from '@/services/public';
+import { authStorage } from '@/services/auth-storage';
 
-const hasAuthToken = () => !!localStorage.getItem('auth_token');
+const hasAuthToken = () => !!authStorage.getToken();
 
-const getCurrentUserRole = (): string => {
+const getCurrentUser = (): { id?: string; userType?: string; officialRole?: string } | null => {
   try {
-    const raw = localStorage.getItem('user');
-    if (!raw) return '';
-    const parsed = JSON.parse(raw) as { officialRole?: string } | null;
-    return String(parsed?.officialRole || '').trim().toLowerCase();
+    const raw = authStorage.getUser();
+    if (!raw) return null;
+    return JSON.parse(raw) as { id?: string; userType?: string; officialRole?: string } | null;
   } catch {
-    return '';
+    return null;
   }
 };
 
+const getCurrentUserRole = (): string =>
+  String(getCurrentUser()?.officialRole || '').trim().toLowerCase();
+
 const isIncidentVisibleToCurrentUser = (incident: Incident): boolean => {
+  const currentUser = getCurrentUser();
+  const currentUserId = String(currentUser?.id || '').trim();
+  const userType = String(currentUser?.userType || '').trim().toLowerCase();
+  if (userType === 'citizen' || userType === 'local') {
+    return currentUserId !== '' && String(incident.reporterId || '').trim() === currentUserId;
+  }
+
   const role = getCurrentUserRole();
   if (role !== 'field_inspector') {
     return true;
@@ -35,7 +45,11 @@ const createIncidentsSocket = () => {
   if (!API_CONFIG.WS_BASE_URL) {
     return null;
   }
-  return new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents`);
+  const token = authStorage.getToken();
+  if (!token) {
+    return null;
+  }
+  return new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents?token=${encodeURIComponent(token)}`);
 };
 
 export const useIncidents = () => {

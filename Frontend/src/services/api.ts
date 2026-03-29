@@ -1,4 +1,5 @@
 import { API_CONFIG } from '@/config/api';
+import { authStorage } from './auth-storage';
 
 
 
@@ -64,7 +65,7 @@ class ApiClient {
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
     try {
-      const token = localStorage.getItem('auth_token');
+      const token = authStorage.getToken();
       
       const response = await fetch(`${this.baseURL}${endpoint}`, {
         ...options,
@@ -94,8 +95,7 @@ class ApiClient {
           'Request failed';
 
         if (response.status === 401 && token) {
-          localStorage.removeItem('auth_token');
-          localStorage.removeItem('user');
+          authStorage.clear();
 
           if (typeof window !== 'undefined') {
             const loginPath = window.location.pathname.startsWith('/official') ? '/official/login' : '/login';
@@ -175,7 +175,7 @@ class ApiClient {
       });
     }
 
-    const token = localStorage.getItem('auth_token');
+    const token = authStorage.getToken();
 
     try {
       const response = await fetch(`${this.baseURL}${endpoint}`, {

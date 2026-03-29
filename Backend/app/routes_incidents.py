@@ -210,6 +210,11 @@ def _can_access_incident(doc: dict, user: dict):
         return True
     return False
 
+def _can_receive_incident_event(user: dict | None, doc: dict) -> bool:
+    if not isinstance(user, dict):
+        return False
+    return _can_access_incident(doc, user)
+
 def _ticket_status_for_incident(doc: dict) -> str:
     incident_object_id = doc.get("_id")
     incident_id = str(incident_object_id) if incident_object_id is not None else ""
@@ -573,15 +578,30 @@ def _create_ticket_from_incident(doc: dict):
     result = tickets.insert_one(ticket_doc)
     return {"id": result.inserted_id, "ticketId": public_ticket_id}
 
+def _incident_rows_for_user(current_user: dict) -> list[dict]:
+    if _is_official(current_user):
+        data = list(incidents.find({}).sort("createdAt", -1))
+        if _current_official_role(current_user) == ROLE_FIELD_INSPECTOR:
+            data = [row for row in data if _has_department_or_supervisor_verification(row)]
+        return data
+
+    current_user_id = str(current_user.get("id") or "").strip()
+    if not current_user_id:
+        return []
+
+    reporter_selectors: list[dict] = [{"reporterId": current_user_id}]
+    try:
+        reporter_selectors.append({"reporterId": to_object_id(current_user_id)})
+    except Exception:
+        pass
+
+    data = list(incidents.find({"$or": reporter_selectors}).sort("createdAt", -1))
+    return [row for row in data if _can_access_incident(row, current_user)]
+
 @router.get("/incidents")
 @router.get("/issues")
 def get_incidents(current_user: dict = Depends(get_current_user)):
-    query = {}
-    if not _is_official(current_user):
-        query["reporterId"] = current_user.get("id")
-    data = list(incidents.find(query).sort("createdAt", -1))
-    if _current_official_role(current_user) == ROLE_FIELD_INSPECTOR:
-        data = [row for row in data if _has_department_or_supervisor_verification(row)]
+    data = _incident_rows_for_user(current_user)
     for row in data:
         row["officialActionTaken"] = _reporter_edit_locked(row)
         row["reporterDeleteLocked"] = _reporter_delete_locked(row)
@@ -592,31 +612,12 @@ def get_incidents(current_user: dict = Depends(get_current_user)):
 @router.get("/incidents/stats")
 @router.get("/issues/stats")
 def stats(current_user: dict = Depends(get_current_user)):
-    query = {}
-    if not _is_official(current_user):
-        query["reporterId"] = current_user.get("id")
-    if _current_official_role(current_user) == ROLE_FIELD_INSPECTOR:
-        data = [row for row in incidents.find(query) if _has_department_or_supervisor_verification(row)]
-        total = len(data)
-        open_c = sum(1 for row in data if (row.get("status") or "").strip().lower() == "open")
-        pending_c = sum(1 for row in data if (row.get("status") or "").strip().lower() == "pending")
-        in_prog = sum(1 for row in data if (row.get("status") or "").strip().lower() == "in_progress")
-        resolved = sum(1 for row in data if (row.get("status") or "").strip().lower() == "resolved")
-        return {
-            "success": True,
-            "data": {
-                "total": total,
-                "open": open_c,
-                "inProgress": in_prog,
-                "resolved": resolved,
-                "pending": pending_c
-            }
-        }
-    total = incidents.count_documents(query)
-    open_c = incidents.count_documents({**query, "status": "open"})
-    pending_c = incidents.count_documents({**query, "status": "pending"})
-    in_prog = incidents.count_documents({**query, "status": "in_progress"})
-    resolved = incidents.count_documents({**query, "status": "resolved"})
+    data = _incident_rows_for_user(current_user)
+    total = len(data)
+    open_c = sum(1 for row in data if (row.get("status") or "").strip().lower() == "open")
+    pending_c = sum(1 for row in data if (row.get("status") or "").strip().lower() == "pending")
+    in_prog = sum(1 for row in data if (row.get("status") or "").strip().lower() == "in_progress")
+    resolved = sum(1 for row in data if (row.get("status") or "").strip().lower() == "resolved")
     return {
         "success": True,
         "data": {
@@ -832,10 +833,13 @@ async def create_incident(
 
     if should_alert_stakeholders:
         _notify_new_issue(payload.get("description", ""), payload.get("latitude"), payload.get("longitude"))
-    await manager.broadcast({
-        "type": "NEW_INCIDENT",
-        "data": payload
-    })
+    await manager.broadcast(
+        {
+            "type": "NEW_INCIDENT",
+            "data": payload
+        },
+        predicate=lambda user: _can_receive_incident_event(user, doc or {}),
+    )
     return {"success": True, "data": payload}
 
 @router.get("/incidents/review/email", response_class=HTMLResponse, include_in_schema=False)
@@ -1141,10 +1145,13 @@ async def report_issue(
 
     payload = _sanitize_incident_payload(serialize_doc(doc)) or {}
     _notify_new_issue(description, latitude, longitude)
-    await manager.broadcast({
-        "type": "NEW_INCIDENT",
-        "data": payload
-    })
+    await manager.broadcast(
+        {
+            "type": "NEW_INCIDENT",
+            "data": payload
+        },
+        predicate=lambda user: _can_receive_incident_event(user, doc or {}),
+    )
     return {
         "success": True,
         "ack": {
