@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -27,6 +27,7 @@ import { useTickets } from '@/hooks/use-data';
 import { useToast } from '@/hooks/use-toast';
 import { authService } from '@/services/auth';
 import { incidentService } from '@/services/incidents';
+import { ticketChatService } from '@/services/ticket-chat';
 import { Ticket, TicketLogEntry, ticketService } from '@/services/tickets';
 import { ManagedOfficialAccount, usersService, WorkerAccount } from '@/services/users';
 import { cn } from '@/lib/utils';
@@ -144,6 +145,7 @@ const formatStatus = (value?: string) => {
 };
 
 const FIELD_INSPECTOR_EDIT_WINDOW_MS = 2 * 60 * 1000;
+const CHAT_OPTIONS_CACHE_TTL_MS = 45_000;
 
 const parseIsoMillis = (value?: string): number | null => {
   if (!value) return null;
@@ -460,6 +462,9 @@ const OfficialDashboard = () => {
   const [ticketDetails, setTicketDetails] = useState<Ticket | null>(null);
   const [ticketChatDialogOpen, setTicketChatDialogOpen] = useState(false);
   const [chatTicket, setChatTicket] = useState<Ticket | null>(null);
+  const [chatNotificationByTicket, setChatNotificationByTicket] = useState<Record<string, boolean>>({});
+  const chatOptionsCacheRef = useRef<Record<string, { value: boolean; fetchedAt: number }>>({});
+  const chatOptionsInFlightRef = useRef<Map<string, Promise<boolean>>>(new Map());
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -539,6 +544,97 @@ const OfficialDashboard = () => {
         .includes(term)
     );
   }, [tickets, query]);
+
+  const chatNotificationTicketIds = useMemo(
+    () => filteredTickets.map((ticket) => ticket.id.trim()).filter((id) => id.length > 0),
+    [filteredTickets]
+  );
+
+  useEffect(() => {
+    if (!isTicketsPage || !chatEligibleRole || chatNotificationTicketIds.length === 0) {
+      setChatNotificationByTicket({});
+      return;
+    }
+
+    let cancelled = false;
+    const ticketIdSet = new Set(chatNotificationTicketIds);
+
+    for (const cachedTicketId of Object.keys(chatOptionsCacheRef.current)) {
+      if (!ticketIdSet.has(cachedTicketId)) {
+        delete chatOptionsCacheRef.current[cachedTicketId];
+      }
+    }
+
+    const loadNotificationForTicket = async (ticketId: string, forceRefresh: boolean): Promise<boolean> => {
+      const now = Date.now();
+      const cached = chatOptionsCacheRef.current[ticketId];
+      if (!forceRefresh && cached && now - cached.fetchedAt < CHAT_OPTIONS_CACHE_TTL_MS) {
+        return cached.value;
+      }
+
+      const inFlight = chatOptionsInFlightRef.current.get(ticketId);
+      if (inFlight) {
+        return inFlight;
+      }
+
+      const pending = (async () => {
+        try {
+          const response = await ticketChatService.getOptions(ticketId);
+          const hasNotification = Boolean(
+            response.success &&
+              response.data &&
+              !response.data.initiateEnabled &&
+              response.data.chatVisible &&
+              response.data.existingSessions.length > 0
+          );
+          chatOptionsCacheRef.current[ticketId] = { value: hasNotification, fetchedAt: Date.now() };
+          return hasNotification;
+        } catch {
+          chatOptionsCacheRef.current[ticketId] = { value: false, fetchedAt: Date.now() };
+          return false;
+        } finally {
+          chatOptionsInFlightRef.current.delete(ticketId);
+        }
+      })();
+
+      chatOptionsInFlightRef.current.set(ticketId, pending);
+      return pending;
+    };
+
+    const refreshNotifications = async (forceRefresh: boolean) => {
+      const entries = await Promise.all(
+        chatNotificationTicketIds.map(async (ticketId) => {
+          const hasNotification = await loadNotificationForTicket(ticketId, forceRefresh);
+          return [ticketId, hasNotification] as const;
+        })
+      );
+
+      if (cancelled) return;
+      setChatNotificationByTicket(Object.fromEntries(entries));
+    };
+
+    void refreshNotifications(false);
+
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      void refreshNotifications(true);
+    }, CHAT_OPTIONS_CACHE_TTL_MS);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshNotifications(true);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [chatEligibleRole, chatNotificationTicketIds, isTicketsPage]);
 
   const stats = useMemo(() => {
     const total = tickets.length;
@@ -1142,15 +1238,13 @@ const OfficialDashboard = () => {
                   role === 'field_inspector');
               const showAssignmentSection = isTicketsPage && canAssignWorkers;
               const showChatQuickActions = isTicketsPage && Boolean(chatEligibleRole);
+              const hasChatNotification = Boolean(chatNotificationByTicket[ticket.id]);
               const workerAssignmentHint = workers.length === 0 ? 'No workers available for assignment right now.' : '';
 
               return (
                 <div
                   key={ticket.id}
-                  className={cn(
-                    'relative rounded-xl border border-border bg-card p-4 space-y-3',
-                    showChatQuickActions && 'pb-14'
-                  )}
+                  className="relative rounded-xl border border-border bg-card p-4 space-y-3"
                 >
                   {!!ticket.reopenWarning && role !== 'department' && (
                     <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
@@ -1199,55 +1293,85 @@ const OfficialDashboard = () => {
                     </div>
                   </div>
 
-                  {(showOfficialActions || showLogbookAction) && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {showLogbookAction && (
-                        <Button
-                          variant="outline"
-                          onClick={() => openLogbook(ticket)}
-                          disabled={statusSubmittingId === ticket.id}
-                        >
-                          <ClipboardList className="h-4 w-4 mr-1" />
-                          LogBook
-                        </Button>
-                      )}
-                      {showOfficialActions && (
-                        <>
-                          {(canVerify || canResolve) && (
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="outline" disabled={statusSubmittingId === ticket.id}>
-                                  Actions
-                                  <ChevronDown className="h-4 w-4 ml-1 opacity-60" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="start">
-                                {canVerify && (
-                                  <DropdownMenuItem onClick={() => void handleStatusChange(ticket.id, 'verified')}>
-                                    <UserCheck className="h-4 w-4 mr-2" />
-                                    Verify
-                                  </DropdownMenuItem>
-                                )}
-                                {canResolve && (
-                                  <DropdownMenuItem onClick={() => void handleStatusChange(ticket.id, 'resolved')}>
-                                    <CheckCircle2 className="h-4 w-4 mr-2" />
-                                    Resolve
-                                  </DropdownMenuItem>
-                                )}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          )}
-                          {canReopen && (
+                  {(showOfficialActions || showLogbookAction || showChatQuickActions) && (
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      {(showOfficialActions || showLogbookAction) && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {showLogbookAction && (
                             <Button
                               variant="outline"
-                              onClick={() => void handleStatusChange(ticket.id, 'open')}
+                              onClick={() => openLogbook(ticket)}
                               disabled={statusSubmittingId === ticket.id}
                             >
-                              <RotateCcw className="h-4 w-4 mr-1" />
-                              Reopen
+                              <ClipboardList className="h-4 w-4 mr-1" />
+                              LogBook
                             </Button>
                           )}
-                        </>
+                          {showOfficialActions && (
+                            <>
+                              {(canVerify || canResolve) && (
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button variant="outline" disabled={statusSubmittingId === ticket.id}>
+                                      Actions
+                                      <ChevronDown className="h-4 w-4 ml-1 opacity-60" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="start">
+                                    {canVerify && (
+                                      <DropdownMenuItem onClick={() => void handleStatusChange(ticket.id, 'verified')}>
+                                        <UserCheck className="h-4 w-4 mr-2" />
+                                        Verify
+                                      </DropdownMenuItem>
+                                    )}
+                                    {canResolve && (
+                                      <DropdownMenuItem onClick={() => void handleStatusChange(ticket.id, 'resolved')}>
+                                        <CheckCircle2 className="h-4 w-4 mr-2" />
+                                        Resolve
+                                      </DropdownMenuItem>
+                                    )}
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              )}
+                              {canReopen && (
+                                <Button
+                                  variant="outline"
+                                  onClick={() => void handleStatusChange(ticket.id, 'open')}
+                                  disabled={statusSubmittingId === ticket.id}
+                                >
+                                  <RotateCcw className="h-4 w-4 mr-1" />
+                                  Reopen
+                                </Button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {showChatQuickActions && (
+                        <div className="flex justify-end sm:ml-auto">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border bg-background shadow-sm transition-colors hover:bg-muted"
+                                aria-label={hasChatNotification ? 'Open ticket chat actions with new chat notification' : 'Open ticket chat actions'}
+                              >
+                                {hasChatNotification && (
+                                  <span
+                                    className="absolute right-1 top-1 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-background"
+                                    aria-hidden="true"
+                                  />
+                                )}
+                                <img src="/chat-icon.svg" alt="Chat actions" className="h-5 w-5 text-foreground" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => void openLogbook(ticket)}>Get Report</DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => openTicketChat(ticket)}>Talk to Local Chat</DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
                       )}
                     </div>
                   )}
@@ -1432,25 +1556,6 @@ const OfficialDashboard = () => {
                     </div>
                   )}
 
-                  {showChatQuickActions && (
-                    <div className="absolute bottom-4 right-4">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <button
-                            type="button"
-                            className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-border bg-background shadow-sm transition-colors hover:bg-muted"
-                            aria-label="Open ticket chat actions"
-                          >
-                            <img src="/chat-icon.svg" alt="Chat actions" className="h-5 w-5 text-foreground" />
-                          </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => void openLogbook(ticket)}>Get Report</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => openTicketChat(ticket)}>Talk to Local Chat</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  )}
                 </div>
               );
             })}

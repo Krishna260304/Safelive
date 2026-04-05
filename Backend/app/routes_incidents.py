@@ -1,6 +1,9 @@
 import os
 import logging
 import hashlib
+import difflib
+import math
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -61,6 +64,38 @@ IOT_PRIORITY_BY_SEVERITY = {
 OFFICIAL_ACTIVITY_ROLES = {"department", "supervisor", "field_inspector", "worker"}
 ROLE_FIELD_INSPECTOR = "field_inspector"
 LOCAL_REPORTER_EDIT_WINDOW_MINUTES = 5
+LOCAL_USER_TYPES = {"citizen", "local"}
+INACTIVE_DUPLICATE_STATUSES = {"resolved", "rejected"}
+DUPLICATE_TEXT_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "in",
+    "is",
+    "it",
+    "near",
+    "of",
+    "on",
+    "please",
+    "road",
+    "street",
+    "the",
+    "there",
+    "this",
+    "to",
+    "was",
+    "with",
+}
+MIN_DUPLICATE_TEXT_SCORE = 0.42
+CATEGORY_MATCH_DUPLICATE_SCORE = 0.52
+STRICT_DUPLICATE_TEXT_SCORE = 0.72
 
 def _now_iso():
     return datetime.utcnow().isoformat()
@@ -174,6 +209,12 @@ def _get_incident_doc(incident_id: str):
 def _is_official(user: dict):
     return is_official_account(user)
 
+def _user_type_value(user: dict | None) -> str:
+    return str((user or {}).get("userType") or "").strip().lower()
+
+def _clean_user_id(value: object) -> str:
+    return str(value or "").strip()
+
 def _current_official_role(user: dict) -> str | None:
     return normalize_official_role(user.get("officialRole"))
 
@@ -200,20 +241,39 @@ def _has_department_or_supervisor_verification(doc: dict) -> bool:
     )
     return bool(verification_log)
 
-def _can_access_incident(doc: dict, user: dict):
+def _is_common_incident(doc: dict) -> bool:
+    if bool(doc.get("commonIncident")):
+        return True
+    try:
+        return int(doc.get("duplicateReportCount") or 0) >= 2
+    except Exception:
+        return False
+
+def _is_primary_local_reporter(doc: dict, user: dict) -> bool:
+    if _is_official(user):
+        return False
+    reporter_id = _clean_user_id(doc.get("reporterId"))
+    current_user_id = _clean_user_id(user.get("id"))
+    return bool(reporter_id and current_user_id and reporter_id == current_user_id)
+
+def _can_view_incident(doc: dict, user: dict):
     if _is_official(user):
         if _current_official_role(user) == ROLE_FIELD_INSPECTOR:
             return _has_department_or_supervisor_verification(doc)
         return True
-    reporter_id = doc.get("reporterId")
-    if reporter_id and reporter_id == user.get("id"):
+    if _is_primary_local_reporter(doc, user):
         return True
-    return False
+    return _is_common_incident(doc)
+
+def _can_participate_in_incident(doc: dict, user: dict) -> bool:
+    if _is_official(user):
+        return _can_view_incident(doc, user)
+    return _is_primary_local_reporter(doc, user)
 
 def _can_receive_incident_event(user: dict | None, doc: dict) -> bool:
     if not isinstance(user, dict):
         return False
-    return _can_access_incident(doc, user)
+    return _can_view_incident(doc, user)
 
 def _ticket_status_for_incident(doc: dict) -> str:
     incident_object_id = doc.get("_id")
@@ -278,6 +338,300 @@ def _reporter_delete_locked(doc: dict) -> bool:
         {"_id": 1},
     )
     return bool(verification_log)
+
+def _safe_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+def _meters_to_latitude_delta(radius_meters: float) -> float:
+    return float(radius_meters) / 111_320.0
+
+def _meters_to_longitude_delta(radius_meters: float, latitude: float) -> float:
+    cosine = max(abs(math.cos(math.radians(latitude))), 0.01)
+    return float(radius_meters) / (111_320.0 * cosine)
+
+def _haversine_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    earth_radius_m = 6_371_000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(delta_phi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * (math.sin(delta_lambda / 2.0) ** 2)
+    )
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(1.0 - a, 0.0)))
+    return earth_radius_m * c
+
+def _normalize_duplicate_text(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", " ", raw)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+def _duplicate_tokens(*parts: str | None) -> set[str]:
+    text = " ".join(_normalize_duplicate_text(part) for part in parts if str(part or "").strip())
+    if not text:
+        return set()
+    tokens: set[str] = set()
+    for token in text.split():
+        if len(token) < 3:
+            continue
+        if token in DUPLICATE_TEXT_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+def _sequence_similarity(left: str | None, right: str | None) -> float:
+    a = _normalize_duplicate_text(left)
+    b = _normalize_duplicate_text(right)
+    if not a or not b:
+        return 0.0
+    return float(difflib.SequenceMatcher(None, a, b).ratio())
+
+def _token_overlap_metrics(left_tokens: set[str], right_tokens: set[str]) -> tuple[float, float]:
+    if not left_tokens or not right_tokens:
+        return 0.0, 0.0
+    overlap = left_tokens & right_tokens
+    union = left_tokens | right_tokens
+    jaccard = len(overlap) / max(len(union), 1)
+    min_ratio = len(overlap) / max(min(len(left_tokens), len(right_tokens)), 1)
+    return float(jaccard), float(min_ratio)
+
+def _duplicate_similarity_score(
+    *,
+    candidate: dict,
+    title: str | None,
+    description: str | None,
+    category: str | None,
+    severity: str | None,
+    scope: str | None,
+) -> tuple[float, dict[str, float | bool]]:
+    incoming_title = _normalize_duplicate_text(title)
+    incoming_description = _normalize_duplicate_text(description)
+    incoming_combined = " ".join(part for part in [incoming_title, incoming_description] if part).strip()
+
+    candidate_title = _normalize_duplicate_text(candidate.get("title"))
+    candidate_description = _normalize_duplicate_text(candidate.get("description"))
+    candidate_combined = " ".join(part for part in [candidate_title, candidate_description] if part).strip()
+
+    incoming_tokens = _duplicate_tokens(title, description)
+    candidate_tokens = _duplicate_tokens(candidate.get("title"), candidate.get("description"))
+    token_jaccard, token_min_ratio = _token_overlap_metrics(incoming_tokens, candidate_tokens)
+
+    title_ratio = _sequence_similarity(incoming_title, candidate_title)
+    description_ratio = _sequence_similarity(incoming_description, candidate_description)
+    combined_ratio = _sequence_similarity(incoming_combined, candidate_combined)
+    base_text_score = max(
+        combined_ratio,
+        (description_ratio * 0.7) + (title_ratio * 0.3),
+        (token_jaccard * 0.55) + (token_min_ratio * 0.45),
+    )
+
+    incoming_category = _normalize_iot_token(category)
+    candidate_category = _normalize_iot_token(candidate.get("category"))
+    category_match = bool(incoming_category and candidate_category and incoming_category == candidate_category)
+
+    incoming_severity = _normalize_iot_token(severity)
+    candidate_severity = _normalize_iot_token(candidate.get("severity"))
+    severity_match = bool(incoming_severity and candidate_severity and incoming_severity == candidate_severity)
+
+    incoming_scope = _normalize_iot_token(scope)
+    candidate_scope = _normalize_iot_token(candidate.get("scope"))
+    scope_match = bool(incoming_scope and candidate_scope and incoming_scope == candidate_scope)
+
+    score = base_text_score
+    if category_match:
+        score += 0.12
+    if severity_match:
+        score += 0.04
+    if scope_match:
+        score += 0.02
+    if token_min_ratio >= 0.5:
+        score += 0.04
+
+    details: dict[str, float | bool] = {
+        "base_text_score": round(base_text_score, 4),
+        "title_ratio": round(title_ratio, 4),
+        "description_ratio": round(description_ratio, 4),
+        "combined_ratio": round(combined_ratio, 4),
+        "token_jaccard": round(token_jaccard, 4),
+        "token_min_ratio": round(token_min_ratio, 4),
+        "category_match": category_match,
+        "severity_match": severity_match,
+        "scope_match": scope_match,
+    }
+    return float(score), details
+
+def _is_duplicate_similarity_match(
+    *,
+    candidate: dict,
+    title: str | None,
+    description: str | None,
+    category: str | None,
+    severity: str | None,
+    scope: str | None,
+) -> tuple[bool, float, dict[str, float | bool]]:
+    score, details = _duplicate_similarity_score(
+        candidate=candidate,
+        title=title,
+        description=description,
+        category=category,
+        severity=severity,
+        scope=scope,
+    )
+    base_text_score = float(details.get("base_text_score") or 0.0)
+    category_match = bool(details.get("category_match"))
+    token_min_ratio = float(details.get("token_min_ratio") or 0.0)
+
+    if base_text_score < MIN_DUPLICATE_TEXT_SCORE:
+        return False, score, details
+    if category_match and score >= CATEGORY_MATCH_DUPLICATE_SCORE:
+        return True, score, details
+    if score >= STRICT_DUPLICATE_TEXT_SCORE and token_min_ratio >= 0.45:
+        return True, score, details
+    return False, score, details
+
+def _incident_origin_is_local(doc: dict) -> bool:
+    reporter_user_type = str(doc.get("reporterUserType") or "").strip().lower()
+    if reporter_user_type in LOCAL_USER_TYPES:
+        return True
+    if reporter_user_type:
+        return False
+
+    reporter_id = _clean_user_id(doc.get("reporterId"))
+    if not reporter_id:
+        return False
+
+    user_doc = None
+    try:
+        user_doc = users.find_one({"_id": to_object_id(reporter_id)}, {"userType": 1})
+    except Exception:
+        user_doc = users.find_one({"_id": reporter_id}, {"userType": 1})
+    return str((user_doc or {}).get("userType") or "").strip().lower() in LOCAL_USER_TYPES
+
+def _find_local_duplicate_incident(
+    *,
+    latitude: float | None,
+    longitude: float | None,
+    title: str | None,
+    description: str | None,
+    category: str | None,
+    severity: str | None,
+    scope: str | None,
+) -> dict | None:
+    lat = _safe_float(latitude)
+    lon = _safe_float(longitude)
+    radius_meters = max(float(settings.INCIDENT_DUPLICATE_RADIUS_METERS or 0.0), 0.0)
+    if lat is None or lon is None or radius_meters <= 0:
+        return None
+
+    lat_delta = _meters_to_latitude_delta(radius_meters)
+    lon_delta = _meters_to_longitude_delta(radius_meters, lat)
+    query = {
+        "status": {"$nin": sorted(INACTIVE_DUPLICATE_STATUSES)},
+        "latitude": {"$gte": lat - lat_delta, "$lte": lat + lat_delta},
+        "longitude": {"$gte": lon - lon_delta, "$lte": lon + lon_delta},
+    }
+
+    best_match: dict | None = None
+    best_distance: float | None = None
+    best_score: float | None = None
+    for candidate in incidents.find(query).sort("createdAt", 1).limit(25):
+        if not _incident_origin_is_local(candidate):
+            continue
+
+        candidate_lat = _safe_float(candidate.get("latitude"))
+        candidate_lon = _safe_float(candidate.get("longitude"))
+        if candidate_lat is None or candidate_lon is None:
+            continue
+
+        distance_meters = _haversine_distance_meters(lat, lon, candidate_lat, candidate_lon)
+        if distance_meters > radius_meters:
+            continue
+
+        is_match, similarity_score, _details = _is_duplicate_similarity_match(
+            candidate=candidate,
+            title=title,
+            description=description,
+            category=category,
+            severity=severity,
+            scope=scope,
+        )
+        if not is_match:
+            continue
+
+        if (
+            best_match is None
+            or best_score is None
+            or similarity_score > best_score
+            or (
+                abs(similarity_score - best_score) < 1e-6
+                and (best_distance is None or distance_meters < best_distance)
+            )
+        ):
+            best_match = candidate
+            best_distance = distance_meters
+            best_score = similarity_score
+
+    return best_match
+
+def _merge_local_duplicate_into_incident(existing_doc: dict, current_user: dict, *, now: str) -> dict:
+    obj_id = existing_doc.get("_id")
+    if not obj_id:
+        return existing_doc
+
+    local_reporter_ids: list[str] = []
+    reporter_id = _clean_user_id(existing_doc.get("reporterId"))
+    if reporter_id:
+        local_reporter_ids.append(reporter_id)
+    for row in existing_doc.get("localReporterIds") or []:
+        clean_value = _clean_user_id(row)
+        if clean_value and clean_value not in local_reporter_ids:
+            local_reporter_ids.append(clean_value)
+    current_user_id = _clean_user_id(current_user.get("id"))
+    if current_user_id and current_user_id not in local_reporter_ids:
+        local_reporter_ids.append(current_user_id)
+
+    duplicate_report_count = max(
+        len(local_reporter_ids),
+        int(existing_doc.get("duplicateReportCount") or 0),
+        int(existing_doc.get("votes") or 0),
+        1,
+    )
+    common_incident = duplicate_report_count >= 2
+    update_fields = {
+        "commonIncident": common_incident,
+        "duplicateReportCount": duplicate_report_count,
+        "lastDuplicateAt": now,
+        "localReporterIds": local_reporter_ids,
+        "updatedAt": now,
+        "votes": duplicate_report_count,
+    }
+    incidents.update_one({"_id": obj_id}, {"$set": update_fields})
+    refreshed = incidents.find_one({"_id": obj_id})
+    return refreshed or {**existing_doc, **update_fields}
+
+async def _duplicate_incident_response(existing_doc: dict, current_user: dict, *, now: str) -> dict:
+    refreshed = _merge_local_duplicate_into_incident(existing_doc, current_user, now=now)
+    payload = _incident_payload_for_user(refreshed, current_user) or {}
+    if isinstance(payload, dict):
+        payload["duplicateMatch"] = True
+    await manager.broadcast(
+        predicate=lambda user: _can_receive_incident_event(user, refreshed or {}),
+        message_factory=lambda user: _incident_ws_message_for_user(refreshed, user),
+    )
+    radius_meters = int(round(max(float(settings.INCIDENT_DUPLICATE_RADIUS_METERS or 0.0), 0.0)))
+    return {
+        "success": True,
+        "message": f"A matching incident already exists within {radius_meters} meters. Showing the existing incident instead of creating a duplicate.",
+        "data": payload,
+    }
 
 def _notify_new_issue(description: str, lat: float | None, lon: float | None):
     try:
@@ -528,17 +882,43 @@ def _incident_review_html(title: str, message: str) -> HTMLResponse:
 def _sanitize_incident_payload(payload: dict | None) -> dict | None:
     if not isinstance(payload, dict):
         return payload
+    payload.pop("localReporterIds", None)
+    payload.pop("reporterUserType", None)
     approval = payload.get("criticalApproval")
-    if not isinstance(approval, dict):
-        return payload
-    recipients = approval.get("recipients")
-    if not isinstance(recipients, list):
-        return payload
-    for recipient in recipients:
-        if isinstance(recipient, dict):
-            recipient.pop("approveTokenHash", None)
-            recipient.pop("rejectTokenHash", None)
+    if isinstance(approval, dict):
+        recipients = approval.get("recipients")
+        if isinstance(recipients, list):
+            for recipient in recipients:
+                if isinstance(recipient, dict):
+                    recipient.pop("approveTokenHash", None)
+                    recipient.pop("rejectTokenHash", None)
     return payload
+
+def _incident_payload_for_user(doc: dict | None, user: dict | None) -> dict | None:
+    if not isinstance(doc, dict):
+        return None
+    payload = _sanitize_incident_payload(serialize_doc(doc)) or {}
+    if not isinstance(payload, dict) or not isinstance(user, dict):
+        return payload
+    if _is_official(user):
+        return payload
+    if _is_primary_local_reporter(doc, user):
+        return payload
+    if _is_common_incident(doc):
+        payload.pop("reportedBy", None)
+        payload.pop("reporterId", None)
+        payload.pop("reporterEmail", None)
+        payload.pop("reporterPhone", None)
+    return payload
+
+def _incident_ws_message_for_user(doc: dict | None, user: dict | None) -> dict | None:
+    payload = _incident_payload_for_user(doc, user)
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "type": "NEW_INCIDENT",
+        "data": payload,
+    }
 
 def _create_ticket_from_incident(doc: dict):
     if not doc:
@@ -595,18 +975,26 @@ def _incident_rows_for_user(current_user: dict) -> list[dict]:
     except Exception:
         pass
 
-    data = list(incidents.find({"$or": reporter_selectors}).sort("createdAt", -1))
-    return [row for row in data if _can_access_incident(row, current_user)]
+    query = {
+        "$or": [
+            {"commonIncident": True},
+            *reporter_selectors,
+        ]
+    }
+    data = list(incidents.find(query).sort("createdAt", -1))
+    return [row for row in data if _can_view_incident(row, current_user)]
 
 @router.get("/incidents")
 @router.get("/issues")
 def get_incidents(current_user: dict = Depends(get_current_user)):
     data = _incident_rows_for_user(current_user)
+    safe_data: list[dict] = []
     for row in data:
         row["officialActionTaken"] = _reporter_edit_locked(row)
         row["reporterDeleteLocked"] = _reporter_delete_locked(row)
-    serialized = serialize_list(data)
-    safe_data = [_sanitize_incident_payload(item) for item in serialized]
+        payload = _incident_payload_for_user(row, current_user)
+        if isinstance(payload, dict):
+            safe_data.append(payload)
     return {"success": True, "data": safe_data}
 
 @router.get("/incidents/stats")
@@ -633,17 +1021,17 @@ def stats(current_user: dict = Depends(get_current_user)):
 @router.get("/issues/{incident_id}")
 def get_incident(incident_id: str, current_user: dict = Depends(get_current_user)):
     doc = _get_incident_doc(incident_id)
-    if not _can_access_incident(doc, current_user):
+    if not _can_view_incident(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     doc["officialActionTaken"] = _reporter_edit_locked(doc)
     doc["reporterDeleteLocked"] = _reporter_delete_locked(doc)
-    return {"success": True, "data": _sanitize_incident_payload(serialize_doc(doc))}
+    return {"success": True, "data": _incident_payload_for_user(doc, current_user)}
 
 @router.get("/incidents/{incident_id}/logbook")
 @router.get("/issues/{incident_id}/logbook")
 def get_incident_logbook_entries(incident_id: str, current_user: dict = Depends(get_current_user)):
     doc = _get_incident_doc(incident_id)
-    if not _can_access_incident(doc, current_user):
+    if not _can_view_incident(doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     data = get_incident_logbook(incident_id)
     return {"success": True, "data": data}
@@ -665,6 +1053,18 @@ async def create_incident(
     critical_email_recipients: list[dict] = []
 
     if not _is_official(current_user):
+        duplicate_doc = _find_local_duplicate_incident(
+            latitude=data.get("latitude"),
+            longitude=data.get("longitude"),
+            title=data.get("title"),
+            description=data.get("description"),
+            category=data.get("category"),
+            severity=data.get("severity"),
+            scope=data.get("scope"),
+        )
+        if duplicate_doc:
+            return await _duplicate_incident_response(duplicate_doc, current_user, now=now)
+
         validation = validate_incident_report(
             title=data.get("title"),
             description=data.get("description"),
@@ -749,6 +1149,19 @@ async def create_incident(
             data["reviewRequired"] = True
             should_alert_stakeholders = False
 
+    if not _is_official(current_user):
+        duplicate_doc = _find_local_duplicate_incident(
+            latitude=data.get("latitude"),
+            longitude=data.get("longitude"),
+            title=data.get("title"),
+            description=data.get("description"),
+            category=data.get("category"),
+            severity=data.get("severity"),
+            scope=data.get("scope"),
+        )
+        if duplicate_doc:
+            return await _duplicate_incident_response(duplicate_doc, current_user, now=now)
+
     image_urls = _save_images(images)
     if image_urls:
         data["imageUrls"] = image_urls
@@ -765,6 +1178,7 @@ async def create_incident(
     if current_user:
         data["reportedBy"] = current_user.get("name") or current_user.get("email") or current_user.get("phone")
         data["reporterId"] = current_user.get("id")
+        data["reporterUserType"] = _user_type_value(current_user)
         reporter_email = _resolve_reporter_email(
             current_user.get("email"),
             current_user.get("id"),
@@ -772,17 +1186,24 @@ async def create_incident(
         )
         data["reporterEmail"] = reporter_email
         data["reporterPhone"] = current_user.get("phone")
+        if not _is_official(current_user):
+            current_user_id = _clean_user_id(current_user.get("id"))
+            data["commonIncident"] = False
+            data["duplicateReportCount"] = 1
+            data["votes"] = max(int(data.get("votes") or 0), 1)
+            if current_user_id:
+                data["localReporterIds"] = [current_user_id]
     result = incidents.insert_one(data)
     doc = incidents.find_one({"_id": result.inserted_id})
     ticket_info = _create_ticket_from_incident(doc)
     if ticket_info:
         incidents.update_one({"_id": result.inserted_id}, {"$set": {"ticketId": ticket_info.get("ticketId")}})
         doc = incidents.find_one({"_id": result.inserted_id})
-    payload = _sanitize_incident_payload(serialize_doc(doc)) or {}
+    payload = _incident_payload_for_user(doc, current_user) or {}
     reporter_email = _resolve_reporter_email(
-        payload.get("reporterEmail"),
-        payload.get("reporterId"),
-        payload.get("reporterPhone"),
+        doc.get("reporterEmail") if isinstance(doc, dict) else None,
+        doc.get("reporterId") if isinstance(doc, dict) else None,
+        doc.get("reporterPhone") if isinstance(doc, dict) else None,
     )
     if reporter_email and not _is_official(current_user):
         background_tasks.add_task(
@@ -834,11 +1255,8 @@ async def create_incident(
     if should_alert_stakeholders:
         _notify_new_issue(payload.get("description", ""), payload.get("latitude"), payload.get("longitude"))
     await manager.broadcast(
-        {
-            "type": "NEW_INCIDENT",
-            "data": payload
-        },
         predicate=lambda user: _can_receive_incident_event(user, doc or {}),
+        message_factory=lambda user: _incident_ws_message_for_user(doc, user),
     )
     return {"success": True, "data": payload}
 
@@ -1108,6 +1526,7 @@ async def report_issue(
         "updatedAt": now,
         "hasMessages": False,
         "officialActionTaken": False,
+        "reporterUserType": "iot",
         "reportedBy": _sanitize_iot_text(issue.reportedBy, default=f"IoT Device {device_id}", max_len=120),
         "aiPriority": {
             "priority": priority_value,
@@ -1146,11 +1565,8 @@ async def report_issue(
     payload = _sanitize_incident_payload(serialize_doc(doc)) or {}
     _notify_new_issue(description, latitude, longitude)
     await manager.broadcast(
-        {
-            "type": "NEW_INCIDENT",
-            "data": payload
-        },
         predicate=lambda user: _can_receive_incident_event(user, doc or {}),
+        message_factory=lambda user: _incident_ws_message_for_user(doc, user),
     )
     return {
         "success": True,
@@ -1174,7 +1590,7 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
         raise HTTPException(status_code=400, detail="No updates provided")
 
     if not is_official_user:
-        if not _can_access_incident(existing_doc, current_user):
+        if not _is_primary_local_reporter(existing_doc, current_user):
             raise HTTPException(status_code=403, detail="Access denied")
         if _reporter_edit_window_expired(existing_doc):
             raise HTTPException(
@@ -1246,7 +1662,7 @@ def update_incident(incident_id: str, incident: IncidentUpdate, current_user: di
                 LOGGER.warning("Resolved notification email failed for incident %s: %s", incident_id, exc)
         elif updates.get("status") == "resolved":
             LOGGER.warning("Resolved notification email skipped: reporter email unavailable for incident %s", incident_id)
-    return {"success": True, "data": _sanitize_incident_payload(serialize_doc(doc))}
+    return {"success": True, "data": _incident_payload_for_user(doc, current_user)}
 
 @router.delete("/incidents/{incident_id}")
 @router.delete("/issues/{incident_id}")
@@ -1257,7 +1673,7 @@ def delete_incident(incident_id: str, current_user: dict = Depends(get_current_u
         raise HTTPException(status_code=404, detail="Incident not found")
 
     if not _is_official(current_user):
-        if not _can_access_incident(doc, current_user):
+        if not _is_primary_local_reporter(doc, current_user):
             raise HTTPException(status_code=403, detail="Access denied")
         reporter_id = str(doc.get("reporterId") or "").strip()
         current_user_id = str(current_user.get("id") or "").strip()
@@ -1285,7 +1701,7 @@ def delete_incident(incident_id: str, current_user: dict = Depends(get_current_u
 @router.get("/issues/{incident_id}/messages")
 def get_messages(incident_id: str, current_user: dict = Depends(get_current_user)):
     incident_doc = _get_incident_doc(incident_id)
-    if not _can_access_incident(incident_doc, current_user):
+    if not _can_participate_in_incident(incident_doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     data = list(messages.find({"incidentId": incident_id}).sort("createdAt", 1))
     return {"success": True, "data": serialize_list(data)}
@@ -1294,7 +1710,7 @@ def get_messages(incident_id: str, current_user: dict = Depends(get_current_user
 @router.post("/issues/{incident_id}/messages")
 async def create_message(incident_id: str, payload: MessageCreate, current_user: dict = Depends(get_current_user)):
     incident_doc = _get_incident_doc(incident_id)
-    if not _can_access_incident(incident_doc, current_user):
+    if not _can_participate_in_incident(incident_doc, current_user):
         raise HTTPException(status_code=403, detail="Access denied")
     message_doc = {
         "incidentId": incident_id,

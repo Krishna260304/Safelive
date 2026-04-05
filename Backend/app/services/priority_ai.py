@@ -11,6 +11,13 @@ from io import BytesIO
 from pathlib import Path
 from app.config.settings import settings
 from app.database import incidents
+from app.services.hf_runtime import (
+    HF_MODEL_LOAD_LOCK,
+    discard_cached_pipeline,
+    get_cached_pipeline,
+    get_or_create_cached_pipeline,
+    is_meta_tensor_error,
+)
 LOGGER = logging.getLogger(__name__)
 PRIORITY_LEVELS = ("low", "medium", "high")
 DEFAULT_VISION_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -25,6 +32,153 @@ RISK_ALIASES = {
     "medium": {"medium", "moderate", "normal", "average"},
     "high": {"high", "major", "urgent", "emergency", "critical", "extreme"},
 }
+HIGH_PRIORITY_CATEGORIES = {"electricity", "safety", "drainage", "waterlogging"}
+MEDIUM_PRIORITY_CATEGORIES = {"pothole", "streetlight", "water_leakage", "garbage"}
+LOW_PRIORITY_CATEGORIES = {"other"}
+HIGH_PRIORITY_KEYWORDS = {
+    "live wire",
+    "electrocution",
+    "shock",
+    "spark",
+    "fire",
+    "smoke",
+    "sewage overflow",
+    "open manhole",
+    "collapsed",
+    "blocked road",
+    "accident",
+    "injury",
+    "flood",
+    "overflow",
+    "urgent",
+    "critical",
+    "hazard",
+    "danger",
+    "emergency",
+}
+MEDIUM_PRIORITY_KEYWORDS = {
+    "pothole",
+    "water leakage",
+    "leakage",
+    "garbage pile",
+    "streetlight not working",
+    "street light not working",
+    "drain clogged",
+    "service disruption",
+    "needs repair",
+}
+LOW_PRIORITY_KEYWORDS = {
+    "minor",
+    "small",
+    "routine",
+    "cleaning needed",
+    "non urgent",
+    "non-urgent",
+    "later",
+}
+
+
+def _severity_to_priority(value: str | None) -> str | None:
+    normalized = _clean(value)
+    if not normalized:
+        return None
+    if normalized in {"critical", "severe", "major", "high", "urgent", "emergency"}:
+        return "high"
+    if normalized in {"moderate", "medium", "normal"}:
+        return "medium"
+    if normalized in {"low", "minor", "routine"}:
+        return "low"
+    return None
+
+
+def _text_blob(*parts: str | None) -> str:
+    merged = " ".join(str(part or "").strip().lower() for part in parts if str(part or "").strip())
+    return re.sub(r"\s+", " ", merged).strip()
+
+
+def _keyword_hits(text: str, keywords: set[str]) -> int:
+    if not text:
+        return 0
+    hits = 0
+    for keyword in keywords:
+        if keyword and keyword in text:
+            hits += 1
+    return hits
+
+
+def _heuristic_priority_scores(
+    *,
+    title: str | None,
+    description: str | None,
+    category: str | None,
+    severity: str | None,
+) -> dict[str, float]:
+    scores = {"low": 0.3, "medium": 0.4, "high": 0.3}
+    category_label = _clean(category)
+    severity_label = _severity_to_priority(severity)
+    text = _text_blob(title, description)
+
+    if category_label in HIGH_PRIORITY_CATEGORIES:
+        scores["high"] += 0.35
+        scores["medium"] += 0.1
+    elif category_label in MEDIUM_PRIORITY_CATEGORIES:
+        scores["medium"] += 0.25
+    elif category_label in LOW_PRIORITY_CATEGORIES:
+        scores["low"] += 0.2
+
+    if severity_label == "high":
+        scores["high"] += 0.45
+        scores["medium"] += 0.1
+    elif severity_label == "medium":
+        scores["medium"] += 0.35
+        scores["high"] += 0.05
+    elif severity_label == "low":
+        scores["low"] += 0.35
+        scores["medium"] += 0.05
+
+    high_hits = _keyword_hits(text, HIGH_PRIORITY_KEYWORDS)
+    medium_hits = _keyword_hits(text, MEDIUM_PRIORITY_KEYWORDS)
+    low_hits = _keyword_hits(text, LOW_PRIORITY_KEYWORDS)
+
+    if high_hits > 0:
+        scores["high"] += min(0.9, 0.25 * high_hits)
+    if medium_hits > 0:
+        scores["medium"] += min(0.45, 0.12 * medium_hits)
+    if low_hits > 0 and high_hits == 0:
+        scores["low"] += min(0.4, 0.12 * low_hits)
+
+    # Do not down-rank obvious hazards even when text model is uncertain.
+    if high_hits > 0 and scores["high"] < scores["medium"]:
+        scores["high"] = scores["medium"] + 0.05
+
+    normalized = _normalize_distribution(scores)
+    if normalized:
+        return normalized
+    return {"low": 0.2, "medium": 0.6, "high": 0.2}
+
+
+def _blend_distributions(
+    primary: dict[str, float] | None,
+    secondary: dict[str, float] | None,
+    *,
+    primary_weight: float,
+) -> dict[str, float]:
+    normalized_primary = _normalize_distribution(primary)
+    normalized_secondary = _normalize_distribution(secondary)
+    if not normalized_primary and not normalized_secondary:
+        return {"low": 0.2, "medium": 0.6, "high": 0.2}
+    if not normalized_primary:
+        return normalized_secondary or {"low": 0.2, "medium": 0.6, "high": 0.2}
+    if not normalized_secondary:
+        return normalized_primary
+
+    clamped_weight = max(0.0, min(1.0, float(primary_weight)))
+    complement = 1.0 - clamped_weight
+    merged = {
+        priority: (normalized_primary[priority] * clamped_weight) + (normalized_secondary[priority] * complement)
+        for priority in PRIORITY_LEVELS
+    }
+    return _normalize_distribution(merged) or normalized_primary
 def _clean(value: str | None) -> str:
     return (value or "").strip().lower()
 def _normalize_distribution(raw: dict[str, float] | None) -> dict[str, float] | None:
@@ -162,6 +316,7 @@ class VisionPriorityModel:
     def __init__(self):
         self._processor = None
         self._model = None
+        self._pipeline = None
         self._load_attempted = False
         self._lock = threading.Lock()
     def _ensure_loaded(self) -> None:
@@ -173,38 +328,42 @@ class VisionPriorityModel:
             self._load_attempted = True
             if not settings.PRIORITY_AI_ENABLED:
                 return
+            if not settings.PRIORITY_AI_ENABLE_VISION:
+                LOGGER.info("Priority vision model disabled; using text and heuristic scoring only.")
+                return
             _set_hf_env()
             model_id = (settings.PRIORITY_AI_MODEL or DEFAULT_VISION_MODEL_ID).strip() or DEFAULT_VISION_MODEL_ID
             try:
-                import torch
-                try:
-                    from transformers import AutoModel
-                    from PIL import Image
-                    self._model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
-                    LOGGER.info("Loaded priority model: %s", model_id)
-                except ImportError as e1:
-                    LOGGER.debug("AutoModel import failed: %s, trying pipeline...", e1)
+                with HF_MODEL_LOAD_LOCK:
+                    import torch
                     try:
-                        from transformers import pipeline
-                        _, device_name = _resolve_hf_pipeline_device()
-                        self._pipeline = pipeline(
-                            "zero-shot-classification",
-                            model=DEFAULT_TEXT_MODEL_ID,
-                        )
-                        LOGGER.info("Loaded text classification model: %s (device=%s)", DEFAULT_TEXT_MODEL_ID, device_name)
-                        return
-                    except Exception as e2:
-                        LOGGER.debug("Pipeline fallback failed: %s", e2)
-                        raise
-                dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-                try:
-                    self._model = self._model.to(dtype)
-                    if torch.cuda.is_available():
-                        self._model = self._model.to("cuda")
-                except Exception as device_err:
-                    LOGGER.debug("Device placement issue: %s", device_err)
-                self._model.eval()
-                LOGGER.info("Priority vision model ready: %s", model_id)
+                        from transformers import AutoModel
+                        from PIL import Image
+                        self._model = AutoModel.from_pretrained(model_id, trust_remote_code=True)
+                        LOGGER.info("Loaded priority model: %s", model_id)
+                    except ImportError as e1:
+                        LOGGER.debug("AutoModel import failed: %s, trying pipeline...", e1)
+                        try:
+                            from transformers import pipeline
+                            _, device_name = _resolve_hf_pipeline_device()
+                            self._pipeline = pipeline(
+                                "zero-shot-classification",
+                                model=DEFAULT_TEXT_MODEL_ID,
+                            )
+                            LOGGER.info("Loaded text classification model: %s (device=%s)", DEFAULT_TEXT_MODEL_ID, device_name)
+                            return
+                        except Exception as e2:
+                            LOGGER.debug("Pipeline fallback failed: %s", e2)
+                            raise
+                    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+                    try:
+                        self._model = self._model.to(dtype)
+                        if torch.cuda.is_available():
+                            self._model = self._model.to("cuda")
+                    except Exception as device_err:
+                        LOGGER.debug("Device placement issue: %s", device_err)
+                    self._model.eval()
+                    LOGGER.info("Priority vision model ready: %s", model_id)
             except Exception as exc:
                 self._processor = None
                 self._model = None
@@ -240,6 +399,8 @@ class VisionPriorityModel:
         scope: str | None = None,
         source: str | None = None,
     ) -> dict[str, object] | None:
+        if not settings.PRIORITY_AI_ENABLE_VISION:
+            return None
         self._ensure_loaded()
         if not self._model or not self._processor:
             return None
@@ -275,9 +436,21 @@ class VisionPriorityModel:
 class TextPriorityModel:
     def __init__(self):
         self._pipeline = None
+        self._pipeline_cache_key: tuple[str, str, int] | None = None
         self._load_attempted = False
         self._lock = threading.Lock()
         self._label_to_priority = {label.lower(): priority for priority, label in PRIORITY_LABELS.items()}
+    def _smoke_test_pipeline(self, candidate_pipeline) -> None:
+        result = candidate_pipeline(
+            sequences="Open manhole is causing a dangerous blockage on the road.",
+            candidate_labels=list(PRIORITY_LABELS.values()),
+            hypothesis_template="This incident is {}.",
+            multi_label=False,
+        )
+        labels = result.get("labels") if isinstance(result, dict) else None
+        scores = result.get("scores") if isinstance(result, dict) else None
+        if not labels or not scores:
+            raise RuntimeError("Priority text model returned an empty classification result")
     def _ensure_loaded(self) -> None:
         if self._load_attempted:
             return
@@ -291,7 +464,6 @@ class TextPriorityModel:
             model_id = (settings.PRIORITY_AI_TEXT_MODEL or DEFAULT_TEXT_MODEL_ID).strip() or DEFAULT_TEXT_MODEL_ID
             try:
                 from transformers import pipeline
-                
                 device_id = _resolve_hf_device()
                 if device_id >= 0:
                     load_attempts = [
@@ -306,41 +478,59 @@ class TextPriorityModel:
                         {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
                         {},
                     ]
-                
                 last_error = None
-                loaded_on_gpu = False
-                
                 for load_kwargs in load_attempts:
                     current_device = load_kwargs.get("device", device_id)
-                    
-                    if loaded_on_gpu and current_device < 0:
-                        continue
-                    
-                    try:
-                        self._pipeline = pipeline(
-                            "zero-shot-classification", 
-                            model=model_id, 
-                            trust_remote_code=True,
-                            **load_kwargs
+                    cache_key = ("zero-shot-classification", model_id, int(current_device))
+                    cached_pipeline = get_cached_pipeline(*cache_key)
+                    if cached_pipeline is not None:
+                        self._pipeline = cached_pipeline
+                        self._pipeline_cache_key = cache_key
+                        LOGGER.info(
+                            "Reused shared priority text model: %s (device=%s)",
+                            model_id,
+                            "cuda" if current_device >= 0 else "cpu",
                         )
-                        LOGGER.info("Loaded priority text model: %s (device=%s)", model_id, "cuda" if current_device >= 0 else "cpu")
-                        if current_device >= 0:
-                            loaded_on_gpu = True
+                        return
+                    try:
+                        def _loader():
+                            candidate_pipeline = pipeline(
+                                "zero-shot-classification",
+                                model=model_id,
+                                trust_remote_code=True,
+                                **load_kwargs,
+                            )
+                            self._smoke_test_pipeline(candidate_pipeline)
+                            return candidate_pipeline
+
+                        candidate_pipeline = get_or_create_cached_pipeline(
+                            "zero-shot-classification",
+                            model_id,
+                            current_device,
+                            _loader,
+                        )
+                        self._pipeline = candidate_pipeline
+                        self._pipeline_cache_key = cache_key
+                        LOGGER.info(
+                            "Loaded priority text model: %s (device=%s)",
+                            model_id,
+                            "cuda" if current_device >= 0 else "cpu",
+                        )
                         return
                     except Exception as exc:
                         last_error = exc
-                        exc_str = str(exc).lower()
-                        if "meta tensor" in exc_str or "cannot be called on meta tensors" in exc_str:
+                        self._pipeline = None
+                        self._pipeline_cache_key = None
+                        if is_meta_tensor_error(exc):
                             LOGGER.debug("Meta-tensor load issue with args %s: %s", load_kwargs, exc)
-                            continue
                         continue
-                
                 self._pipeline = None
+                self._pipeline_cache_key = None
                 if last_error:
                     raise last_error
-                
             except Exception as exc:
                 self._pipeline = None
+                self._pipeline_cache_key = None
                 LOGGER.warning("Priority text model unavailable: %s", exc)
     def predict_scores(self, text: str) -> dict[str, float] | None:
         self._ensure_loaded()
@@ -354,7 +544,11 @@ class TextPriorityModel:
                 multi_label=False,
             )
         except Exception as exc:
-            LOGGER.warning("Text priority inference failed: %s", exc)
+            if self._pipeline_cache_key:
+                discard_cached_pipeline(*self._pipeline_cache_key)
+                self._pipeline_cache_key = None
+            self._pipeline = None
+            LOGGER.warning("Text priority inference failed; disabling text model and using heuristic fallback: %s", exc)
             return None
         labels = result.get("labels") or []
         scores = result.get("scores") or []
@@ -566,6 +760,11 @@ class PriorityClassifier:
         image_payload: str | None = None,
         image_payloads: list[str] | None = None,
     ) -> PriorityPrediction:
+        resolved_image_payload = _resolve_first_image_payload(
+            image_payload=image_payload,
+            image_payloads=image_payloads,
+        )
+        has_image_context = settings.PRIORITY_AI_ENABLE_VISION and bool((image_path or "").strip() or resolved_image_payload)
         text = self._build_text(
             title=title,
             description=description,
@@ -575,18 +774,20 @@ class PriorityClassifier:
             source=source,
             location=location,
         )
-        vision_payload = self._vision_model.analyze(
-            title=title,
-            description=description,
-            category=category,
-            image_path=image_path,
-            image_payload=image_payload,
-            image_payloads=image_payloads,
-            location=location,
-            severity=severity,
-            scope=scope,
-            source=source,
-        )
+        vision_payload = None
+        if has_image_context:
+            vision_payload = self._vision_model.analyze(
+                title=title,
+                description=description,
+                category=category,
+                image_path=image_path,
+                image_payload=resolved_image_payload,
+                image_payloads=image_payloads,
+                location=location,
+                severity=severity,
+                scope=scope,
+                source=source,
+            )
         vision_scores = None
         if vision_payload:
             risk = _normalize_risk(str(vision_payload.get("risk") or vision_payload.get("priority") or ""))
@@ -609,15 +810,27 @@ class PriorityClassifier:
                 vision_scores = _normalize_distribution(parsed_scores)
         text_scores = self._text_model.predict_scores(text)
         dataset_scores = self._dataset_model.predict_scores(text)
+        heuristic_scores = _heuristic_priority_scores(
+            title=title,
+            description=description,
+            category=category,
+            severity=severity,
+        )
         combined, source_name = self._combine_scores(
             vision_scores=vision_scores,
             text_scores=text_scores,
             dataset_scores=dataset_scores,
         )
+        if source_name == "default":
+            combined = heuristic_scores
+            source_name = "heuristic"
+        else:
+            # Blend model output with rule-guarded heuristics to reduce obvious misclassifications.
+            combined = _blend_distributions(combined, heuristic_scores, primary_weight=0.72)
+            source_name = f"{source_name}+heuristic_guard"
+
         chosen = max(PRIORITY_LEVELS, key=lambda priority: combined.get(priority, 0.0))
         confidence = round(max(0.0, min(1.0, combined.get(chosen, 0.0))), 4)
-        if source_name == "default":
-            return PriorityPrediction(priority="medium", confidence=0.34, source="default")
         return PriorityPrediction(priority=chosen, confidence=confidence, source=source_name)
 _classifier = PriorityClassifier()
 def predict_incident_priority(

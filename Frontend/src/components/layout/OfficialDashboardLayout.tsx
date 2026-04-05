@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell,
@@ -16,9 +16,9 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SettingsModal } from '@/components/SettingsModal';
-import { API_CONFIG } from '@/config/api';
-import { authStorage } from '@/services/auth-storage';
 import { authService } from '@/services/auth';
+import { getOrCreateIdentityKeyPair, isChatCryptoSupported } from '@/services/chat-crypto';
+import { subscribeIncidentSocket } from '@/services/realtime';
 import { ticketChatService } from '@/services/ticket-chat';
 import { cn } from '@/lib/utils';
 
@@ -51,6 +51,7 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [receivedChatCount, setReceivedChatCount] = useState(0);
+  const inboxRequestInFlightRef = useRef<Promise<number> | null>(null);
 
   const user = authService.getCurrentUser();
   const role = toOfficialRole(user?.officialRole);
@@ -91,12 +92,26 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
       return 0;
     }
 
-    const response = await ticketChatService.getInboxSummary();
-    if (!response.success || !response.data) {
-      return 0;
+    if (inboxRequestInFlightRef.current) {
+      return inboxRequestInFlightRef.current;
     }
 
-    return Math.max(0, Number(response.data.receivedChatsCount || 0));
+    const pending = (async () => {
+      const response = await ticketChatService.getInboxSummary();
+      if (!response.success || !response.data) {
+        return 0;
+      }
+      return Math.max(0, Number(response.data.receivedChatsCount || 0));
+    })();
+
+    inboxRequestInFlightRef.current = pending;
+    try {
+      return await pending;
+    } finally {
+      if (inboxRequestInFlightRef.current === pending) {
+        inboxRequestInFlightRef.current = null;
+      }
+    }
   }, [canAccessChatAlerts]);
 
   useEffect(() => {
@@ -116,43 +131,71 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
 
     void refreshCount();
     const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
       void refreshCount();
     }, 30000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshCount();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [canAccessChatAlerts, fetchReceivedChatCount]);
 
   useEffect(() => {
-    if (!canAccessChatAlerts || !API_CONFIG.WS_BASE_URL) return;
-    const token = authStorage.getToken();
-    if (!token) return;
-
     let active = true;
-    const socket = new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents?token=${encodeURIComponent(token)}`);
+    if (!canAccessChatAlerts) return;
 
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload?.type !== 'TICKET_CHAT_SYNC') return;
+    const subscription = subscribeIncidentSocket({
+      onMessage: (payload) => {
+        if (!payload || typeof payload !== 'object') return;
+        const eventPayload = payload as { type?: string };
+        if (eventPayload?.type !== 'TICKET_CHAT_SYNC') return;
 
         void fetchReceivedChatCount().then((nextCount) => {
           if (active) {
             setReceivedChatCount(nextCount);
           }
         });
+      },
+    });
+    if (!subscription) return;
+
+    return () => {
+      active = false;
+      subscription.close();
+    };
+  }, [canAccessChatAlerts, fetchReceivedChatCount]);
+
+  useEffect(() => {
+    if (!isChatCryptoSupported()) return;
+    let cancelled = false;
+    const publishIdentityKey = async () => {
+      try {
+        const identity = await getOrCreateIdentityKeyPair();
+        if (cancelled) return;
+        await ticketChatService.upsertIdentityKey({
+          publicKeyJwk: identity.publicKeyJwk,
+          algorithm: identity.algorithm,
+          fingerprint: identity.fingerprint,
+        });
       } catch {
         return;
       }
     };
-
+    void publishIdentityKey();
     return () => {
-      active = false;
-      socket.close();
+      cancelled = true;
     };
-  }, [canAccessChatAlerts, fetchReceivedChatCount]);
+  }, []);
 
   const handleLogout = async () => {
     await authService.logout();

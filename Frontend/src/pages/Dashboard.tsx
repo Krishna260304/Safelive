@@ -249,7 +249,11 @@ const Dashboard = () => {
     if (!isLocalUser) return incidents;
     const currentUserId = String(currentUser?.id || '').trim();
     if (!currentUserId) return [];
-    return incidents.filter((incident) => String(incident.reporterId || '').trim() === currentUserId);
+    return incidents.filter(
+      (incident) =>
+        Boolean(incident.commonIncident) ||
+        String(incident.reporterId || '').trim() === currentUserId
+    );
   }, [currentUser?.id, incidents, isLocalUser]);
 
   const filtered = useMemo(() => {
@@ -347,8 +351,16 @@ const Dashboard = () => {
     if (status === 'verified' || status === 'in_progress' || status === 'resolved') {
       return false;
     }
-    if (!currentUser?.id) return true;
-    return !incident.reporterId || incident.reporterId === currentUser.id;
+    const reporterId = String(incident.reporterId || '').trim();
+    const currentUserId = String(currentUser?.id || '').trim();
+    return Boolean(reporterId && currentUserId && reporterId === currentUserId);
+  }, [currentUser?.id, isLocalUser]);
+
+  const canOpenIncidentChat = useCallback((incident: Incident) => {
+    if (!isLocalUser) return true;
+    const reporterId = String(incident.reporterId || '').trim();
+    const currentUserId = String(currentUser?.id || '').trim();
+    return Boolean(reporterId && currentUserId && reporterId === currentUserId);
   }, [currentUser?.id, isLocalUser]);
 
   const handleOpenEditIncident = useCallback((incident: Incident) => {
@@ -442,9 +454,17 @@ const Dashboard = () => {
   };
 
   const handleOpenChat = useCallback((incident: Incident) => {
+    if (!canOpenIncidentChat(incident)) {
+      toast({
+        title: 'Chat Unavailable',
+        description: 'Only the original reporter can open chat for a shared incident.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setChatIncident(incident);
     setChatDialogOpen(true);
-  }, []);
+  }, [canOpenIncidentChat, toast]);
 
   const logbookRows = useMemo(() => {
     return logbookEntries.map((entry) => ({
@@ -709,7 +729,7 @@ const Dashboard = () => {
                     key={incident.id}
                     onClick={() => setSelectedId(incident.id)}
                     className={cn(
-                      "relative p-4 pb-14 bg-card rounded-lg border border-border cursor-pointer transition-all hover:border-primary hover:shadow-md",
+                      "relative rounded-lg border border-border bg-card p-4 cursor-pointer transition-all hover:border-primary hover:shadow-md",
                       selected?.id === incident.id && "border-primary bg-primary/5"
                     )}
                   >
@@ -764,7 +784,7 @@ const Dashboard = () => {
                         </div>
                       </div>
                     </div>
-                    <div className="absolute bottom-4 right-4">
+                    <div className="mt-3 flex justify-end">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <button
@@ -785,14 +805,16 @@ const Dashboard = () => {
                           >
                             Get Report
                           </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              handleOpenChat(incident);
-                            }}
-                          >
-                            Talk to Official
-                          </DropdownMenuItem>
+                          {canOpenIncidentChat(incident) && (
+                            <DropdownMenuItem
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleOpenChat(incident);
+                              }}
+                            >
+                              Talk to Official
+                            </DropdownMenuItem>
+                          )}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>

@@ -3,13 +3,23 @@ import { Download, Loader2, Paperclip, SendHorizontal, X } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { API_CONFIG } from '@/config/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
-import { authStorage } from '@/services/auth-storage';
+import { getRealtimeTransportSecurityError, subscribeIncidentSocket } from '@/services/realtime';
+import {
+  decryptBytesWithKey,
+  decryptTextWithKey,
+  deriveSessionEncryptionKey,
+  encryptBytesWithKey,
+  encryptTextWithKey,
+  getOrCreateIdentityKeyPair,
+  isChatCryptoSupported,
+  verifyOrStorePeerFingerprint,
+} from '@/services/chat-crypto';
 import {
   TicketChatMessage,
   TicketChatSession,
+  TicketChatSessionKeyBundle,
   TicketChatTargetRole,
   TicketChatUserOption,
   ticketChatService,
@@ -71,9 +81,37 @@ const userOptionLabel = (option: TicketChatUserOption): string => {
   return department ? `${option.name} (${department})` : option.name;
 };
 
+const attachmentMediaTypeFromMime = (mimeType: string): 'image' | 'video' | 'file' => {
+  const normalized = (mimeType || '').trim().toLowerCase();
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('video/')) return 'video';
+  return 'file';
+};
+
+const resolvePeerParticipantKey = (
+  currentSession: TicketChatSession | null,
+  currentUserId: string
+): { participantId: string; bundle: TicketChatSessionKeyBundle } | null => {
+  if (!currentSession || !currentUserId) return null;
+  const participantKeys = currentSession.participantKeys || {};
+  for (const participant of currentSession.participants || []) {
+    const participantId = String(participant.userId || '').trim();
+    if (!participantId || participantId === currentUserId) continue;
+    const bundle = participantKeys[participantId];
+    if (bundle && bundle.publicKeyJwk) {
+      return {
+        participantId,
+        bundle,
+      };
+    }
+  }
+  return null;
+};
+
 export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialogProps) => {
   const { toast } = useToast();
   const ticketRefId = (ticket?.id || '').trim();
+  const transportSecurityError = getRealtimeTransportSecurityError();
 
   const [optionsLoading, setOptionsLoading] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -110,9 +148,25 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
 
   const [session, setSession] = useState<TicketChatSession | null>(null);
   const [messages, setMessages] = useState<TicketChatMessage[]>([]);
+  const [encryptionStatus, setEncryptionStatus] = useState<'unsupported' | 'initializing' | 'waiting-peer' | 'ready' | 'error'>(
+    isChatCryptoSupported() ? 'initializing' : 'unsupported'
+  );
+  const [encryptionError, setEncryptionError] = useState('');
+  const [decryptedTextByMessageId, setDecryptedTextByMessageId] = useState<Record<string, string>>({});
+  const [decryptedAttachmentUrlByKey, setDecryptedAttachmentUrlByKey] = useState<Record<string, string>>({});
+  const [decryptionFailuresByMessageId, setDecryptionFailuresByMessageId] = useState<Record<string, boolean>>({});
+  const [sessionEncryptionVersion, setSessionEncryptionVersion] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const sessionRef = useRef<TicketChatSession | null>(null);
+  const previousSessionIdRef = useRef('');
+  const sessionEncryptionKeyRef = useRef<CryptoKey | null>(null);
+  const localPublicKeyJwkRef = useRef<JsonWebKey | null>(null);
+  const localPrivateKeyRef = useRef<CryptoKey | null>(null);
+  const localFingerprintRef = useRef('');
+  const registeredKeySessionsRef = useRef<Set<string>>(new Set());
+  const createdObjectUrlsRef = useRef<Set<string>>(new Set());
 
   const selectedExistingSession = useMemo(() => {
     if (!options || options.existingSessions.length === 0) return null;
@@ -120,6 +174,7 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
   }, [options]);
 
   const canSendMessages = Boolean(session) && !session?.endedAt;
+  const canSendEncryptedMessages = canSendMessages && encryptionStatus === 'ready';
 
   const selectedTargetOptions = useMemo(() => {
     if (!options || !selectedTargetRole) return [] as TicketChatUserOption[];
@@ -143,7 +198,23 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     }, 30);
   }, []);
 
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  const cleanupDecryptedAttachmentUrls = useCallback(() => {
+    for (const objectUrl of createdObjectUrlsRef.current) {
+      try {
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        continue;
+      }
+    }
+    createdObjectUrlsRef.current.clear();
+  }, []);
+
   const resetConversationState = useCallback(() => {
+    cleanupDecryptedAttachmentUrls();
     setSession(null);
     setMessages([]);
     setMessageDraft('');
@@ -151,7 +222,60 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     setSelectedTargetRole('');
     setSelectedTargetUserId('');
     setRealtimeConnected(false);
-  }, []);
+    setEncryptionStatus(isChatCryptoSupported() ? 'initializing' : 'unsupported');
+    setEncryptionError('');
+    setDecryptedTextByMessageId({});
+    setDecryptedAttachmentUrlByKey({});
+    setDecryptionFailuresByMessageId({});
+    sessionEncryptionKeyRef.current = null;
+    localPublicKeyJwkRef.current = null;
+    localPrivateKeyRef.current = null;
+    localFingerprintRef.current = '';
+    registeredKeySessionsRef.current = new Set();
+    previousSessionIdRef.current = '';
+    setSessionEncryptionVersion(0);
+  }, [cleanupDecryptedAttachmentUrls]);
+
+  const clearActiveSessionState = useCallback(() => {
+    cleanupDecryptedAttachmentUrls();
+    setSession(null);
+    setMessages([]);
+    setMessageDraft('');
+    setQueuedFiles([]);
+    setMessagesLoading(false);
+    setSending(false);
+    setEndingChat(false);
+    setDownloadingPdf(false);
+    setDecryptedTextByMessageId({});
+    setDecryptedAttachmentUrlByKey({});
+    setDecryptionFailuresByMessageId({});
+    sessionRef.current = null;
+    sessionEncryptionKeyRef.current = null;
+    previousSessionIdRef.current = '';
+    setSessionEncryptionVersion(0);
+    setEncryptionStatus(isChatCryptoSupported() ? 'initializing' : 'unsupported');
+    setEncryptionError('');
+  }, [cleanupDecryptedAttachmentUrls]);
+
+  useEffect(() => {
+    return () => {
+      cleanupDecryptedAttachmentUrls();
+    };
+  }, [cleanupDecryptedAttachmentUrls]);
+
+  useEffect(() => {
+    const currentSessionId = String(session?.id || '').trim();
+    if (!currentSessionId || currentSessionId === previousSessionIdRef.current) return;
+    previousSessionIdRef.current = currentSessionId;
+    cleanupDecryptedAttachmentUrls();
+    setDecryptedTextByMessageId({});
+    setDecryptedAttachmentUrlByKey({});
+    setDecryptionFailuresByMessageId({});
+    sessionEncryptionKeyRef.current = null;
+    setSessionEncryptionVersion(0);
+    setEncryptionStatus('initializing');
+    setEncryptionError('');
+  }, [cleanupDecryptedAttachmentUrls, session?.id]);
 
   const loadMessages = useCallback(
     async (nextSession: TicketChatSession, silent = false) => {
@@ -178,25 +302,126 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     [scrollToBottom, ticketRefId, toast]
   );
 
-  useEffect(() => {
-    if (!open || !ticketRefId) return;
+  const ensureLocalIdentityKey = useCallback(async (): Promise<boolean> => {
+    if (!isChatCryptoSupported()) {
+      setEncryptionStatus('unsupported');
+      setEncryptionError('This browser does not support WebCrypto for end-to-end encryption.');
+      return false;
+    }
+    if (localPublicKeyJwkRef.current && localPrivateKeyRef.current && localFingerprintRef.current) {
+      return true;
+    }
+    try {
+      const keyPair = await getOrCreateIdentityKeyPair();
+      localPublicKeyJwkRef.current = keyPair.publicKeyJwk;
+      localPrivateKeyRef.current = keyPair.privateKey;
+      localFingerprintRef.current = keyPair.fingerprint || '';
+      return true;
+    } catch (error) {
+      setEncryptionStatus('error');
+      setEncryptionError(error instanceof Error ? error.message : 'Unable to initialize encryption keys.');
+      return false;
+    }
+  }, []);
 
-    let cancelled = false;
-    const initialize = async () => {
-      setOptionsLoading(true);
-      resetConversationState();
+  const tryDeriveSessionKey = useCallback(
+    async (currentSession: TicketChatSession): Promise<boolean> => {
+      const currentUserId = String(options?.currentUserId || '').trim();
+      const localPrivateKey = localPrivateKeyRef.current;
+      if (!currentUserId || !localPrivateKey) return false;
+
+      const peerParticipant = resolvePeerParticipantKey(currentSession, currentUserId);
+      const peerPublicKeyJwk = peerParticipant?.bundle.publicKeyJwk;
+      if (!peerPublicKeyJwk) return false;
+
+      try {
+        if (peerParticipant) {
+          const trustResult = await verifyOrStorePeerFingerprint(peerParticipant.participantId, peerPublicKeyJwk);
+          if (trustResult.status === 'changed') {
+            setEncryptionStatus('error');
+            setEncryptionError('Peer encryption key changed unexpectedly. Potential MITM risk. End chat and verify the participant.');
+            return false;
+          }
+        }
+        const derivedKey = await deriveSessionEncryptionKey(currentSession.id, localPrivateKey, peerPublicKeyJwk);
+        sessionEncryptionKeyRef.current = derivedKey;
+        setEncryptionError('');
+        setEncryptionStatus('ready');
+        setSessionEncryptionVersion((prev) => prev + 1);
+        return true;
+      } catch (error) {
+        setEncryptionStatus('error');
+        setEncryptionError(error instanceof Error ? error.message : 'Unable to derive session encryption key.');
+        return false;
+      }
+    },
+    [options?.currentUserId]
+  );
+
+  const announceSessionKey = useCallback(
+    async (currentSession: TicketChatSession): Promise<void> => {
+      if (!ticketRefId) return;
+      const sessionId = (currentSession.id || '').trim();
+      if (!sessionId || registeredKeySessionsRef.current.has(sessionId)) {
+        return;
+      }
+      const hasIdentity = await ensureLocalIdentityKey();
+      if (!hasIdentity || !localPublicKeyJwkRef.current) return;
+
+      setEncryptionStatus('initializing');
+      const identityResponse = await ticketChatService.upsertIdentityKey({
+        publicKeyJwk: localPublicKeyJwkRef.current,
+        algorithm: 'ECDH-P256',
+        fingerprint: localFingerprintRef.current || undefined,
+      });
+      if (!identityResponse.success) {
+        setEncryptionStatus('error');
+        setEncryptionError(identityResponse.error || 'Unable to publish identity key.');
+        return;
+      }
+      const response = await ticketChatService.upsertSessionKey(ticketRefId, sessionId, {
+        publicKeyJwk: localPublicKeyJwkRef.current,
+        algorithm: 'ECDH-P256',
+        fingerprint: localFingerprintRef.current || undefined,
+      });
+      if (!response.success || !response.data) {
+        setEncryptionStatus('error');
+        setEncryptionError(response.error || 'Unable to exchange encryption keys.');
+        return;
+      }
+
+      registeredKeySessionsRef.current.add(sessionId);
+      setSession((prev) => {
+        if (!prev || prev.id !== sessionId) return prev;
+        return response.data?.session || prev;
+      });
+      const nextSession = response.data.session || currentSession;
+      const ready = await tryDeriveSessionKey(nextSession);
+      if (!ready) {
+        setEncryptionStatus('waiting-peer');
+      }
+    },
+    [ensureLocalIdentityKey, ticketRefId, tryDeriveSessionKey]
+  );
+
+  const loadOptions = useCallback(
+    async ({ showLoading = false, resetState = false }: { showLoading?: boolean; resetState?: boolean } = {}) => {
+      if (!ticketRefId) return null;
+      if (transportSecurityError) return null;
+      if (showLoading) {
+        setOptionsLoading(true);
+      }
+      if (resetState) {
+        resetConversationState();
+      }
+
       const response = await ticketChatService.getOptions(ticketRefId);
-      if (cancelled) return;
-
       if (!response.success || !response.data) {
         setOptions(null);
-        setOptionsLoading(false);
-        toast({
-          title: 'Chat Unavailable',
-          description: response.error || 'Unable to load chat options for this ticket.',
-          variant: 'destructive',
-        });
-        return;
+        if (showLoading) {
+          setOptionsLoading(false);
+        }
+        return null;
       }
 
       const payload = response.data;
@@ -227,32 +452,63 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
         setSelectedTargetUserId('');
 
         const firstSession = payload.existingSessions[0];
-        if (payload.chatVisible && firstSession) {
+        const currentSession = sessionRef.current;
+        const shouldAutoOpenReceivedSession =
+          payload.chatVisible &&
+          Boolean(firstSession) &&
+          (!currentSession || currentSession.id !== firstSession.id || Boolean(currentSession.endedAt));
+
+        if (shouldAutoOpenReceivedSession && firstSession) {
           setSessionLoading(true);
           const sessionResponse = await ticketChatService.openSession(ticketRefId, {
             targetRole: firstSession.targetRole,
           });
-          if (cancelled) return;
 
-          if (!sessionResponse.success || !sessionResponse.data) {
-            setSessionLoading(false);
-            setOptionsLoading(false);
+          if (sessionResponse.success && sessionResponse.data) {
+            setSession(sessionResponse.data);
+            await loadMessages(sessionResponse.data, !showLoading);
+          } else if (showLoading) {
             toast({
               title: 'Unable to Open Chat',
               description: sessionResponse.error || 'Could not open the received chat session.',
               variant: 'destructive',
             });
-            return;
           }
-
-          setSession(sessionResponse.data);
-          await loadMessages(sessionResponse.data);
-          if (cancelled) return;
           setSessionLoading(false);
         }
       }
 
+      if (showLoading) {
+        setOptionsLoading(false);
+      }
+
+      return payload;
+    },
+    [loadMessages, resetConversationState, ticketRefId, toast, transportSecurityError]
+  );
+
+  useEffect(() => {
+    if (!open || !ticketRefId) return;
+    if (transportSecurityError) {
+      resetConversationState();
+      setOptions(null);
       setOptionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const initialize = async () => {
+      const response = await loadOptions({ showLoading: true, resetState: true });
+      if (cancelled) return;
+
+      if (!response) {
+        toast({
+          title: 'Chat Unavailable',
+          description: 'Unable to load chat options for this ticket.',
+          variant: 'destructive',
+        });
+        return;
+      }
     };
 
     void initialize();
@@ -260,7 +516,7 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
     return () => {
       cancelled = true;
     };
-  }, [loadMessages, open, resetConversationState, ticketRefId, toast]);
+  }, [loadOptions, open, resetConversationState, ticketRefId, toast, transportSecurityError]);
 
   useEffect(() => {
     if (!options || !selectedTargetRole) {
@@ -289,43 +545,234 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
   }, [options, selectedTargetRole]);
 
   useEffect(() => {
-    if (!open || !ticketRefId || !session) return;
+    if (!open || !session || transportSecurityError) return;
+    void announceSessionKey(session);
+  }, [announceSessionKey, open, session, transportSecurityError]);
+
+  useEffect(() => {
+    if (!open || !session || transportSecurityError) return;
+    if (sessionEncryptionKeyRef.current) return;
+    void tryDeriveSessionKey(session).then((ready) => {
+      if (!ready) {
+        setEncryptionStatus('waiting-peer');
+      }
+    });
+  }, [open, session, session?.updatedAt, transportSecurityError, tryDeriveSessionKey]);
+
+  useEffect(() => {
+    if (!open || !ticketRefId || !session || session.endedAt) return;
     const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
       void loadMessages(session, true);
-    }, 5000);
+    }, realtimeConnected ? 20000 : 5000);
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [loadMessages, open, session, ticketRefId]);
+  }, [loadMessages, open, realtimeConnected, session, ticketRefId]);
 
   useEffect(() => {
-    if (!open || !ticketRefId || !session) return;
-    if (!API_CONFIG.WS_BASE_URL) return;
-    const token = authStorage.getToken();
-    if (!token) return;
+    const encryptionKey = sessionEncryptionKeyRef.current;
+    if (!open || !session || !encryptionKey || sessionEncryptionVersion <= 0) return;
 
-    const socket = new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents?token=${encodeURIComponent(token)}`);
+    let cancelled = false;
+    const decryptPendingTextMessages = async () => {
+      const decryptedRows: Record<string, string> = {};
+      const failures: Record<string, boolean> = {};
+      for (const entry of messages) {
+        if (!entry.encrypted || !entry.messageCiphertext || !entry.messageIv) continue;
+        if (decryptedTextByMessageId[entry.id]) continue;
+        try {
+          decryptedRows[entry.id] = await decryptTextWithKey(encryptionKey, entry.messageCiphertext, entry.messageIv);
+        } catch {
+          failures[entry.id] = true;
+        }
+      }
 
-    socket.onopen = () => setRealtimeConnected(true);
-    socket.onerror = () => setRealtimeConnected(false);
-    socket.onclose = () => setRealtimeConnected(false);
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        const data = payload?.data;
-        if (payload?.type !== 'TICKET_CHAT_SYNC') return;
-        if (!data || data.ticketId !== options?.ticketId || data.sessionId !== session.id) return;
-        void loadMessages(session, true);
-      } catch {
-        return;
+      if (cancelled) return;
+      if (Object.keys(decryptedRows).length > 0) {
+        setDecryptedTextByMessageId((prev) => ({ ...prev, ...decryptedRows }));
+      }
+      if (Object.keys(failures).length > 0) {
+        setDecryptionFailuresByMessageId((prev) => ({ ...prev, ...failures }));
       }
     };
 
+    void decryptPendingTextMessages();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [decryptedTextByMessageId, messages, open, session, sessionEncryptionVersion]);
+
+  useEffect(() => {
+    const encryptionKey = sessionEncryptionKeyRef.current;
+    if (!open || !session || !encryptionKey || sessionEncryptionVersion <= 0) return;
+
+    let cancelled = false;
+    const decryptPendingAttachments = async () => {
+      const nextAttachmentUrls: Record<string, string> = {};
+      for (const entry of messages) {
+        const attachments = entry.attachments || [];
+        for (let index = 0; index < attachments.length; index += 1) {
+          const attachment = attachments[index];
+          if (!attachment?.encrypted || !attachment.iv || !attachment.url) continue;
+          const attachmentKey = `${entry.id}:${index}`;
+          if (decryptedAttachmentUrlByKey[attachmentKey]) continue;
+          try {
+            const response = await fetch(attachment.url);
+            if (!response.ok) continue;
+            const encryptedBytes = new Uint8Array(await response.arrayBuffer());
+            const plainBytes = await decryptBytesWithKey(encryptionKey, encryptedBytes, attachment.iv);
+            const blob = new Blob([plainBytes], {
+              type: attachment.originalMimeType || attachment.contentType || 'application/octet-stream',
+            });
+            const objectUrl = URL.createObjectURL(blob);
+            nextAttachmentUrls[attachmentKey] = objectUrl;
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      if (cancelled || Object.keys(nextAttachmentUrls).length === 0) return;
+      for (const objectUrl of Object.values(nextAttachmentUrls)) {
+        createdObjectUrlsRef.current.add(objectUrl);
+      }
+      setDecryptedAttachmentUrlByKey((prev) => ({ ...prev, ...nextAttachmentUrls }));
+    };
+
+    void decryptPendingAttachments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [decryptedAttachmentUrlByKey, messages, open, session, sessionEncryptionVersion]);
+
+  useEffect(() => {
+    if (!open || !ticketRefId || !options?.ticketId) return;
+
+    const subscription = subscribeIncidentSocket({
+      onStateChange: (state) => {
+        setRealtimeConnected(state === 'connected');
+      },
+      onMessage: (payload) => {
+        if (!payload || typeof payload !== 'object') return;
+        const eventPayload = payload as {
+          type?: string;
+          data?: {
+            ticketId?: string;
+            sessionId?: string;
+            at?: string;
+            ended?: boolean;
+            endedAt?: string;
+            started?: boolean;
+            purged?: boolean;
+            purgeReason?: string;
+          };
+        };
+        const data = eventPayload.data;
+        if (eventPayload.type !== 'TICKET_CHAT_SYNC') return;
+        if (!data || data.ticketId !== options.ticketId) return;
+
+        const activeSession = sessionRef.current;
+        const nextSessionId = String(data.sessionId || '').trim();
+        const at = String(data.at || '').trim();
+        const endedAt = String(data.endedAt || at).trim();
+        const purged = Boolean(data.purged);
+        const purgeReason = String(data.purgeReason || '').trim().toLowerCase();
+
+        if (purged) {
+          if (activeSession && activeSession.id === nextSessionId) {
+            clearActiveSessionState();
+            toast({
+              title: 'Chat Deleted',
+              description:
+                purgeReason === 'downloaded'
+                  ? 'Transcript downloaded. Chat has been deleted from storage.'
+                  : 'Chat was disconnected and deleted from storage.',
+            });
+          }
+          void loadOptions();
+          return;
+        }
+
+        if (!activeSession || activeSession.id !== nextSessionId || data.started) {
+          void loadOptions();
+          return;
+        }
+
+        if (data.ended) {
+          setSession((prev) =>
+            prev && prev.id === nextSessionId
+              ? {
+                  ...prev,
+                  endedAt: endedAt || prev.endedAt,
+                  lastActivityAt: at || prev.lastActivityAt,
+                  updatedAt: at || prev.updatedAt,
+                }
+              : prev
+          );
+        } else if (at) {
+          setSession((prev) =>
+            prev && prev.id === nextSessionId
+              ? {
+                  ...prev,
+                  lastActivityAt: at,
+                  updatedAt: at,
+                }
+              : prev
+          );
+        }
+
+        void loadMessages(activeSession, true);
+      },
+    });
+
+    if (!subscription) {
+      setRealtimeConnected(false);
+      return;
+    }
+
     return () => {
       setRealtimeConnected(false);
-      socket.close();
+      subscription.close();
     };
-  }, [loadMessages, open, options?.ticketId, session, ticketRefId]);
+  }, [clearActiveSessionState, loadMessages, loadOptions, open, options?.ticketId, ticketRefId, toast]);
+
+  useEffect(() => {
+    if (!open || !ticketRefId || session || options?.initiateEnabled) return;
+
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      void loadOptions();
+    }, 8000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [loadOptions, open, options?.initiateEnabled, session, ticketRefId]);
+
+  useEffect(() => {
+    return () => {
+      const activeSession = sessionRef.current;
+      const sessionId = String(activeSession?.id || '').trim();
+      if (!ticketRefId || !sessionId) return;
+      void ticketChatService.disconnectSession(ticketRefId, sessionId);
+    };
+  }, [ticketRefId]);
+
+  const requestSessionDisconnectPurge = useCallback(
+    async (targetSession: TicketChatSession | null) => {
+      const sessionId = String(targetSession?.id || '').trim();
+      if (!ticketRefId || !sessionId) return;
+      await ticketChatService.disconnectSession(ticketRefId, sessionId);
+    },
+    [ticketRefId]
+  );
 
   const handleStartOrOpenChat = async () => {
     if (!ticketRefId || !options) return;
@@ -388,30 +835,87 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
       });
       return;
     }
-
-    setSending(true);
-    const response = await ticketChatService.sendMessage(ticketRefId, session.id, {
-      message: messageDraft,
-      files: queuedFiles,
-    });
-
-    if (!response.success) {
+    if (!sessionEncryptionKeyRef.current || encryptionStatus !== 'ready') {
       toast({
-        title: 'Message Failed',
-        description: response.error || 'Could not send message.',
+        title: 'Encryption Not Ready',
+        description: 'Waiting for secure key exchange with the other participant.',
         variant: 'destructive',
       });
-      setSending(false);
       return;
     }
 
-    setMessageDraft('');
-    setQueuedFiles([]);
-    if (response.data && response.data.length > 0) {
-      setMessages((prev) => [...prev, ...response.data]);
-      scrollToBottom();
+    setSending(true);
+    const encryptedFiles: File[] = [];
+    const encryptedAttachmentMeta: Array<{
+      encrypted?: boolean;
+      iv?: string;
+      encryptionAlgorithm?: string;
+      mediaType?: 'image' | 'video' | 'file';
+      originalFileName?: string;
+      originalMimeType?: string;
+    }> = [];
+
+    try {
+      const encryptionKey = sessionEncryptionKeyRef.current;
+      if (!encryptionKey) throw new Error('Session encryption key unavailable.');
+
+      const trimmedMessage = messageDraft.trim();
+      const encryptedMessage = trimmedMessage
+        ? await encryptTextWithKey(encryptionKey, trimmedMessage)
+        : null;
+
+      for (const file of queuedFiles) {
+        const sourceBytes = new Uint8Array(await file.arrayBuffer());
+        const encryptedFile = await encryptBytesWithKey(encryptionKey, sourceBytes);
+        const encryptedBlob = new Blob([encryptedFile.ciphertext], { type: 'application/octet-stream' });
+        encryptedFiles.push(new File([encryptedBlob], `${file.name || 'attachment'}.enc`, { type: 'application/octet-stream' }));
+        encryptedAttachmentMeta.push({
+          encrypted: true,
+          iv: encryptedFile.iv,
+          encryptionAlgorithm: encryptedFile.algorithm,
+          mediaType: attachmentMediaTypeFromMime(file.type),
+          originalFileName: file.name,
+          originalMimeType: file.type || 'application/octet-stream',
+        });
+      }
+
+      const response = await ticketChatService.sendMessage(ticketRefId, session.id, {
+        message: '',
+        files: encryptedFiles,
+        encryptedMessage: encryptedMessage
+          ? {
+              ciphertext: encryptedMessage.ciphertext,
+              iv: encryptedMessage.iv,
+              algorithm: encryptedMessage.algorithm,
+            }
+          : null,
+        attachmentMeta: encryptedAttachmentMeta,
+      });
+
+      if (!response.success) {
+        toast({
+          title: 'Message Failed',
+          description: response.error || 'Could not send encrypted message.',
+          variant: 'destructive',
+        });
+        setSending(false);
+        return;
+      }
+
+      setMessageDraft('');
+      setQueuedFiles([]);
+      if (response.data && response.data.length > 0) {
+        setMessages((prev) => [...prev, ...response.data]);
+        scrollToBottom();
+      }
+      await loadMessages(session, true);
+    } catch (error) {
+      toast({
+        title: 'Encryption Failed',
+        description: error instanceof Error ? error.message : 'Could not encrypt message payload.',
+        variant: 'destructive',
+      });
     }
-    await loadMessages(session, true);
     setSending(false);
   };
 
@@ -448,7 +952,15 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
         description: response.error || 'Could not download transcript.',
         variant: 'destructive',
       });
+      setDownloadingPdf(false);
+      return;
     }
+    clearActiveSessionState();
+    await loadOptions();
+    toast({
+      title: 'Transcript Downloaded',
+      description: 'Chat was deleted from storage after download.',
+    });
     setDownloadingPdf(false);
   };
 
@@ -469,6 +981,10 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
   const onDialogOpenChange = (nextOpen: boolean) => {
     onOpenChange(nextOpen);
     if (!nextOpen) {
+      const activeSession = sessionRef.current;
+      if (activeSession) {
+        void requestSessionDisconnectPurge(activeSession);
+      }
       resetConversationState();
       setOptions(null);
       setOptionsLoading(false);
@@ -494,6 +1010,11 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
 
         {ticket && (
           <div className="space-y-4">
+            {transportSecurityError && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+                {transportSecurityError}
+              </div>
+            )}
             {(optionsLoading || !options || options.initiateEnabled || !options.chatVisible || (!session && !options.initiateEnabled)) && (
               <div className="rounded-md border border-border bg-muted/20 p-3">
                 {optionsLoading && <div className="text-sm text-muted-foreground">Loading chat options...</div>}
@@ -589,10 +1110,39 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                     </div>
                     <div>
                       Realtime:{' '}
-                      <span className={cn('font-medium', realtimeConnected ? 'text-success' : 'text-muted-foreground')}>
-                        {realtimeConnected ? 'Connected' : 'Polling fallback'}
+                      <span
+                        className={cn(
+                          'font-medium',
+                          session.endedAt ? 'text-warning' : realtimeConnected ? 'text-success' : 'text-muted-foreground'
+                        )}
+                      >
+                        {session.endedAt ? 'Ended' : realtimeConnected ? 'Connected' : 'Polling fallback'}
                       </span>
                     </div>
+                    <div>
+                      Encryption:{' '}
+                      <span
+                        className={cn(
+                          'font-medium',
+                          encryptionStatus === 'ready'
+                            ? 'text-success'
+                            : encryptionStatus === 'error' || encryptionStatus === 'unsupported'
+                              ? 'text-destructive'
+                              : 'text-muted-foreground'
+                        )}
+                      >
+                        {encryptionStatus === 'ready'
+                          ? 'End-to-end encrypted'
+                          : encryptionStatus === 'waiting-peer'
+                            ? 'Waiting for peer key'
+                            : encryptionStatus === 'error'
+                              ? 'Encryption error'
+                              : encryptionStatus === 'unsupported'
+                                ? 'Unsupported'
+                                : 'Initializing'}
+                      </span>
+                    </div>
+                    {encryptionError && <div className="text-[11px] text-destructive">{encryptionError}</div>}
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -620,6 +1170,12 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                   <div className="space-y-3">
                     {messages.map((entry) => {
                       const ownMessage = (entry.senderId || '').trim() === options?.currentUserId;
+                      const isEncryptedEntry = Boolean(entry.encrypted && entry.messageCiphertext && entry.messageIv);
+                      const decryptedText = isEncryptedEntry ? decryptedTextByMessageId[entry.id] : '';
+                      const hasDecryptionFailure = Boolean(decryptionFailuresByMessageId[entry.id]);
+                      const messageBody = isEncryptedEntry
+                        ? decryptedText || (hasDecryptionFailure ? '[Unable to decrypt message]' : '[Encrypted message]')
+                        : entry.message || '[Attachment]';
                       return (
                         <div key={entry.id} className={cn('flex', ownMessage ? 'justify-end' : 'justify-start')}>
                           <div
@@ -634,14 +1190,28 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                               {entry.senderName || 'User'}
                               {entry.senderRole ? ` (${String(entry.senderRole).replace(/_/g, ' ')})` : ''} | {formatTime(entry.createdAt)}
                             </div>
-                            <div className="whitespace-pre-wrap break-words">{entry.message || '[Attachment]'}</div>
+                            <div className="whitespace-pre-wrap break-words">{messageBody}</div>
 
                             {(entry.attachments || []).length > 0 && (
                               <div className="mt-2 space-y-2">
                                 {(entry.attachments || []).map((attachment, index) => {
                                   const mediaType = (attachment.mediaType || 'file').toLowerCase();
-                                  const url = attachment.url;
-                                  const fileLabel = attachment.fileName || `Attachment ${index + 1}`;
+                                  const attachmentLookupKey = `${entry.id}:${index}`;
+                                  const url = attachment.encrypted
+                                    ? decryptedAttachmentUrlByKey[attachmentLookupKey] || ''
+                                    : attachment.url;
+                                  const fileLabel =
+                                    attachment.originalFileName || attachment.fileName || `Attachment ${index + 1}`;
+                                  if (attachment.encrypted && !url) {
+                                    return (
+                                      <div
+                                        key={`${entry.id}-att-${index}`}
+                                        className="text-xs text-muted-foreground"
+                                      >
+                                        Decrypting attachment...
+                                      </div>
+                                    );
+                                  }
                                   if (mediaType === 'image') {
                                     return (
                                       <a key={`${entry.id}-att-${index}`} href={url} target="_blank" rel="noreferrer" className="block">
@@ -686,12 +1256,17 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                       Chat ended at {formatDateTime(session.endedAt)}. Download transcript PDF or wait for new local initiation.
                     </div>
                   )}
+                  {!session.endedAt && encryptionStatus !== 'ready' && (
+                    <div className="text-xs text-muted-foreground">
+                      Secure channel is not ready yet. Sending is disabled until key exchange completes.
+                    </div>
+                  )}
 
                   <Input
                     value={messageDraft}
                     onChange={(event) => setMessageDraft(event.target.value)}
                     placeholder="Type your message..."
-                    disabled={!canSendMessages || sending}
+                    disabled={!canSendEncryptedMessages || sending}
                   />
 
                   {queuedFiles.length > 0 && (
@@ -722,14 +1297,14 @@ export const TicketChatDialog = ({ open, onOpenChange, ticket }: TicketChatDialo
                         variant="outline"
                         size="sm"
                         onClick={() => fileInputRef.current?.click()}
-                        disabled={!canSendMessages || sending}
+                        disabled={!canSendEncryptedMessages || sending}
                       >
                         <Paperclip className="mr-1 h-4 w-4" />
                         Upload Photo/Video
                       </Button>
                     </div>
 
-                    <Button type="button" onClick={() => void handleSendMessage()} disabled={!canSendMessages || sending}>
+                    <Button type="button" onClick={() => void handleSendMessage()} disabled={!canSendEncryptedMessages || sending}>
                       {sending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <SendHorizontal className="mr-2 h-4 w-4" />}
                       Send
                     </Button>

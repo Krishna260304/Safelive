@@ -18,6 +18,9 @@ export interface Incident {
   reporterId?: string;
   reporterEmail?: string;
   reporterPhone?: string;
+  commonIncident?: boolean;
+  duplicateReportCount?: number;
+  duplicateMatch?: boolean;
   assignedTo?: string;
   incidentId?: string;
   ticketId?: string;

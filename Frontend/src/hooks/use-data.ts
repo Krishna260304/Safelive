@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { incidentService, Incident, IncidentStats, normalizeIncidentMedia } from '@/services/incidents';
 import { ticketService, Ticket, TicketStats } from '@/services/tickets';
 import { API_CONFIG } from '@/config/api';
@@ -9,6 +9,7 @@ import {
   TrendPoint,
 } from '@/services/analytics';
 import { publicService, PublicSummary } from '@/services/public';
+import { subscribeIncidentSocket } from '@/services/realtime';
 import { authStorage } from '@/services/auth-storage';
 
 const hasAuthToken = () => !!authStorage.getToken();
@@ -26,12 +27,16 @@ const getCurrentUser = (): { id?: string; userType?: string; officialRole?: stri
 const getCurrentUserRole = (): string =>
   String(getCurrentUser()?.officialRole || '').trim().toLowerCase();
 
+const isLocalVisibleIncident = (incident: Incident, currentUserId: string): boolean =>
+  Boolean(incident.commonIncident) ||
+  (currentUserId !== '' && String(incident.reporterId || '').trim() === currentUserId);
+
 const isIncidentVisibleToCurrentUser = (incident: Incident): boolean => {
   const currentUser = getCurrentUser();
   const currentUserId = String(currentUser?.id || '').trim();
   const userType = String(currentUser?.userType || '').trim().toLowerCase();
   if (userType === 'citizen' || userType === 'local') {
-    return currentUserId !== '' && String(incident.reporterId || '').trim() === currentUserId;
+    return isLocalVisibleIncident(incident, currentUserId);
   }
 
   const role = getCurrentUserRole();
@@ -39,17 +44,6 @@ const isIncidentVisibleToCurrentUser = (incident: Incident): boolean => {
     return true;
   }
   return ['verified', 'in_progress', 'resolved'].includes(String(incident.status || '').trim().toLowerCase());
-};
-
-const createIncidentsSocket = () => {
-  if (!API_CONFIG.WS_BASE_URL) {
-    return null;
-  }
-  const token = authStorage.getToken();
-  if (!token) {
-    return null;
-  }
-  return new WebSocket(`${API_CONFIG.WS_BASE_URL}/ws/incidents?token=${encodeURIComponent(token)}`);
 };
 
 export const useIncidents = () => {
@@ -86,16 +80,15 @@ export const useIncidents = () => {
       return;
     }
 
-    const socket = createIncidentsSocket();
-    if (!socket) {
-      return;
-    }
-
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload?.type === 'NEW_INCIDENT' && payload.data) {
-          const normalizedIncident = normalizeIncidentMedia(payload.data as Incident);
+    const subscription = subscribeIncidentSocket({
+      onMessage: (payload) => {
+        try {
+          if (!payload || typeof payload !== 'object') return;
+          const eventPayload = payload as { type?: string; data?: Incident };
+          if (eventPayload?.type !== 'NEW_INCIDENT' || !eventPayload.data) {
+            return;
+          }
+          const normalizedIncident = normalizeIncidentMedia(eventPayload.data as Incident);
           if (!isIncidentVisibleToCurrentUser(normalizedIncident)) {
             return;
           }
@@ -106,13 +99,16 @@ export const useIncidents = () => {
             }
             return [normalizedIncident, ...prev];
           });
+        } catch {
+          return;
         }
-      } catch {
-        return;
-      }
-    };
+      },
+    });
+    if (!subscription) {
+      return;
+    }
     return () => {
-      socket.close();
+      subscription.close();
     };
   }, []);
 
@@ -154,6 +150,7 @@ export const useTickets = (filters?: { status?: string; priority?: string; categ
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const pollingInFlightRef = useRef(false);
 
   const fetchTickets = async (silent = false) => {
     if (!hasAuthToken()) {
@@ -162,16 +159,21 @@ export const useTickets = (filters?: { status?: string; priority?: string; categ
       setError(null);
       return;
     }
-    if (!silent) {
-      setLoading(true);
-    }
+    if (silent && pollingInFlightRef.current) return;
+    if (silent) pollingInFlightRef.current = true;
+    if (!silent) setLoading(true);
     setError(null);
-    const response = await ticketService.getTickets(filters);
-
-    if (response.success && response.data) {
-      setTickets(response.data);
-    } else {
-      setError(response.error || 'Failed to fetch tickets');
+    try {
+      const response = await ticketService.getTickets(filters);
+      if (response.success && response.data) {
+        setTickets(response.data);
+      } else {
+        setError(response.error || 'Failed to fetch tickets');
+      }
+    } finally {
+      if (silent) {
+        pollingInFlightRef.current = false;
+      }
     }
     if (!silent) {
       setLoading(false);
@@ -187,10 +189,20 @@ export const useTickets = (filters?: { status?: string; priority?: string; categ
       return;
     }
     const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
       void fetchTickets(true);
     }, 15000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchTickets(true);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [filters?.status, filters?.priority, filters?.category]);
 

@@ -278,9 +278,14 @@ const ReportIncident = () => {
       if (response.success) {
         const incidentId = response.data?.incidentId || response.data?.id;
         const incidentIdText = incidentId ? `Incident ID: ${incidentId}. ` : '';
+        const duplicateMatch = Boolean(response.data?.duplicateMatch);
         toast({
-          title: "Report Submitted!",
-          description: `${incidentIdText}Your incident report has been submitted successfully. You'll receive updates on its progress.`,
+          title: duplicateMatch ? "Existing Incident Found" : "Report Submitted!",
+          description: response.message || (
+            duplicateMatch
+              ? `${incidentIdText}A matching incident already exists nearby, so SafeLive linked you to the existing report instead of creating a duplicate.`
+              : `${incidentIdText}Your incident report has been submitted successfully. You'll receive updates on its progress.`
+          ),
         });
         navigate('/dashboard');
       } else {

@@ -68,13 +68,16 @@ def _warmup_pincode_index_background():
     except Exception as exc:
         LOGGER.warning("Pincode index warmup failed during startup: %s", exc)
 
+def _warmup_services_background():
+    _warmup_priority_model_background()
+    _warmup_progress_model_background()
+    _warmup_logbook_model_background()
+    _warmup_pincode_index_background()
+
 @app.on_event("startup")
 def startup():
     ensure_db_connection()
     init_db()
-    threading.Thread(target=_warmup_priority_model_background, daemon=True).start()
-    threading.Thread(target=_warmup_progress_model_background, daemon=True).start()
-    threading.Thread(target=_warmup_logbook_model_background, daemon=True).start()
-    threading.Thread(target=_warmup_pincode_index_background, daemon=True).start()
+    threading.Thread(target=_warmup_services_background, daemon=True, name="startup-warmups").start()
     start_inspector_reminder_worker()
     start_auto_progress_tracker_worker()

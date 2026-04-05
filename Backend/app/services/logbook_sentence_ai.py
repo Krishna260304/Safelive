@@ -4,15 +4,15 @@ import logging
 import os
 import re
 import threading
-from typing import Any
 
 from app.config.settings import settings
+from app.services.hf_runtime import HF_MODEL_LOAD_LOCK, is_meta_tensor_error
 
 LOGGER = logging.getLogger(__name__)
 
 LOGBOOK_MODEL_FALLBACKS = (
     "google/flan-t5-small",
-    "sshleifer/tiny-t5",
+    "t5-small",
 )
 
 
@@ -173,49 +173,50 @@ def _sanitize_generated_sentence(text: str, actor: dict | None) -> str | None:
     return cleaned
 
 
-def _resolve_hf_pipeline_device() -> int:
+def _resolve_hf_model_device() -> str:
     try:
         import torch  # type: ignore
 
         if torch.cuda.is_available():
-            return 0
+            return "cuda"
     except Exception:
-        return -1
-    return -1
-
-
-def _pipeline_load_attempts(device_id: int) -> list[dict[str, Any]]:
-    if device_id >= 0:
-        candidates = [
-            {"device": device_id},
-            {"device": device_id, "model_kwargs": {"low_cpu_mem_usage": False}},
-            {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
-            {"model_kwargs": {"low_cpu_mem_usage": False}},
-            {},
-        ]
-    else:
-        candidates = [
-            {"device": -1},
-            {"device": -1, "model_kwargs": {"low_cpu_mem_usage": False}},
-            {"model_kwargs": {"low_cpu_mem_usage": False}},
-            {},
-        ]
-    attempts: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in candidates:
-        signature = repr(sorted(item.items()))
-        if signature in seen:
-            continue
-        seen.add(signature)
-        attempts.append(item)
-    return attempts
+        return "cpu"
+    return "cpu"
 
 
 class _LogbookSentenceModel:
     def __init__(self):
-        self._pipeline = None
+        self._tokenizer = None
+        self._model = None
+        self._device = "cpu"
         self._load_attempted = False
         self._load_lock = threading.Lock()
+    def _generate_text(self, prompt: str, max_new_tokens: int) -> str:
+        if not self._tokenizer or not self._model:
+            return ""
+        inputs = self._tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+        )
+        moved_inputs = {
+            key: value.to(self._device) if hasattr(value, "to") else value
+            for key, value in inputs.items()
+        }
+        output = self._model.generate(
+            **moved_inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+        )
+        return str(self._tokenizer.decode(output[0], skip_special_tokens=True) or "").strip()
+    def _smoke_test_model(self) -> None:
+        text = self._generate_text(
+            "Rewrite as a concise logbook sentence. Action: Ticket resolved.",
+            max_new_tokens=24,
+        )
+        if not text:
+            raise RuntimeError("Logbook sentence model returned a blank generation result")
 
     def _ensure_loaded(self):
         if self._load_attempted:
@@ -237,9 +238,10 @@ class _LogbookSentenceModel:
                 else:
                     os.environ.pop("HF_HUB_OFFLINE", None)
 
-                from transformers import pipeline  # type: ignore
+                import torch  # type: ignore
+                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer  # type: ignore
 
-                device_id = _resolve_hf_pipeline_device()
+                device = _resolve_hf_model_device()
                 requested_model = (settings.LOGBOOK_AI_MODEL or "").strip()
                 model_candidates: list[str] = []
                 for candidate in [requested_model, *LOGBOOK_MODEL_FALLBACKS]:
@@ -248,38 +250,34 @@ class _LogbookSentenceModel:
                         model_candidates.append(name)
 
                 last_error: Exception | None = None
-                loaded_on_gpu = False
-                
-                for model_name in model_candidates:
-                    for load_kwargs in _pipeline_load_attempts(device_id):
-                        current_device = load_kwargs.get("device", device_id)
-                        
-                        if loaded_on_gpu and current_device < 0:
-                            continue
-                        
+                with HF_MODEL_LOAD_LOCK:
+                    for model_name in model_candidates:
                         try:
-                            self._pipeline = pipeline(
-                                "text2text-generation",
-                                model=model_name,
+                            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                            model = AutoModelForSeq2SeqLM.from_pretrained(
+                                model_name,
                                 trust_remote_code=True,
-                                **load_kwargs,
+                                low_cpu_mem_usage=False,
                             )
-                            LOGGER.info("Logbook sentence model loaded: %s (device=%s)", model_name, "cuda" if current_device >= 0 else "cpu")
-                            if current_device >= 0:
-                                loaded_on_gpu = True
+                            model = model.to(device)
+                            model.eval()
+                            self._tokenizer = tokenizer
+                            self._model = model
+                            self._device = device
+                            self._smoke_test_model()
+                            LOGGER.info("Logbook sentence model loaded: %s (device=%s)", model_name, device)
                             return
                         except Exception as exc:
                             last_error = exc
-                            exc_str = str(exc).lower()
-                            if "meta tensor" in exc_str or "cannot be called on meta tensors" in exc_str:
-                                LOGGER.debug(
-                                    "Meta-tensor load issue for logbook model %s with args %s: %s",
-                                    model_name,
-                                    load_kwargs,
-                                    exc,
-                                )
+                            self._tokenizer = None
+                            self._model = None
+                            self._device = "cpu"
+                            if is_meta_tensor_error(exc):
+                                LOGGER.debug("Meta-tensor load issue for logbook model %s: %s", model_name, exc)
                             continue
-                self._pipeline = None
+                self._tokenizer = None
+                self._model = None
+                self._device = "cpu"
                 if last_error:
                     raise last_error
                 raise RuntimeError("No usable logbook sentence model candidate could be loaded")
@@ -289,11 +287,13 @@ class _LogbookSentenceModel:
                     settings.LOGBOOK_AI_MODEL,
                     exc,
                 )
-                self._pipeline = None
+                self._tokenizer = None
+                self._model = None
+                self._device = "cpu"
 
     def generate(self, action: str | None, details: dict | None, actor: dict | None) -> str | None:
         self._ensure_loaded()
-        if not self._pipeline:
+        if not self._tokenizer or not self._model:
             return None
         action_text = _action_label(action)
         details_text = _details_text(details)
@@ -308,16 +308,13 @@ class _LogbookSentenceModel:
             prompt_parts.append(f"Performed by {actor_text}.")
         prompt = " ".join(prompt_parts)
         try:
-            result = self._pipeline(prompt, max_new_tokens=40, do_sample=False)
+            text = self._generate_text(prompt, max_new_tokens=40)
         except Exception as exc:
-            LOGGER.debug("Logbook sentence generation failed: %s", exc)
+            self._tokenizer = None
+            self._model = None
+            self._device = "cpu"
+            LOGGER.warning("Logbook sentence generation failed; disabling model and using rule-based fallback: %s", exc)
             return None
-        if not result:
-            return None
-        if isinstance(result, list) and result:
-            text = str(result[0].get("generated_text") or "").strip()
-        else:
-            text = str(result).strip()
         if not text:
             return None
         return _sanitize_generated_sentence(text, actor)

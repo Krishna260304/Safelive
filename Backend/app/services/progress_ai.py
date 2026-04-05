@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config.settings import settings
+from app.services.hf_runtime import (
+    discard_cached_pipeline,
+    get_cached_pipeline,
+    get_or_create_cached_pipeline,
+    is_meta_tensor_error,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -352,8 +358,20 @@ class ProgressPrediction:
 class _ProgressModel:
     def __init__(self):
         self._pipeline = None
+        self._pipeline_cache_key: tuple[str, str, int] | None = None
         self._load_attempted = False
         self._load_lock = threading.Lock()
+    def _smoke_test_pipeline(self, candidate_pipeline) -> None:
+        result = candidate_pipeline(
+            sequences="Initial inspection completed and repair work started.",
+            candidate_labels=list(PROGRESS_LABELS.values()),
+            hypothesis_template="This update indicates {}.",
+            multi_label=False,
+        )
+        labels = result.get("labels") if isinstance(result, dict) else None
+        scores = result.get("scores") if isinstance(result, dict) else None
+        if not labels or not scores:
+            raise RuntimeError("Ticket progress model returned an empty classification result")
 
     def _ensure_loaded(self):
         if self._load_attempted:
@@ -386,35 +404,52 @@ class _ProgressModel:
                         model_candidates.append(name)
 
                 last_error: Exception | None = None
-                loaded_on_gpu = False
-                
                 for model_name in model_candidates:
                     for load_kwargs in _progress_pipeline_load_attempts(device_id):
                         current_device = load_kwargs.get("device", device_id)
-                        
-                        if loaded_on_gpu and current_device < 0:
-                            continue
-                        
-                        try:
-                            self._pipeline = pipeline(
-                                "zero-shot-classification",
-                                model=model_name,
-                                trust_remote_code=True,
-                                **load_kwargs,
+                        cache_key = ("zero-shot-classification", model_name, int(current_device))
+                        cached_pipeline = get_cached_pipeline(*cache_key)
+                        if cached_pipeline is not None:
+                            self._pipeline = cached_pipeline
+                            self._pipeline_cache_key = cache_key
+                            loaded_device_name = device_name if current_device == device_id else "cpu"
+                            LOGGER.info(
+                                "Reused shared ticket progress AI model: %s (device=%s)",
+                                model_name,
+                                loaded_device_name,
                             )
+                            return
+                        try:
+                            def _loader():
+                                candidate_pipeline = pipeline(
+                                    "zero-shot-classification",
+                                    model=model_name,
+                                    trust_remote_code=True,
+                                    **load_kwargs,
+                                )
+                                self._smoke_test_pipeline(candidate_pipeline)
+                                return candidate_pipeline
+
+                            candidate_pipeline = get_or_create_cached_pipeline(
+                                "zero-shot-classification",
+                                model_name,
+                                current_device,
+                                _loader,
+                            )
+                            self._pipeline = candidate_pipeline
+                            self._pipeline_cache_key = cache_key
                             loaded_device_name = device_name if current_device == device_id else "cpu"
                             LOGGER.info(
                                 "Ticket progress AI model loaded: %s (device=%s)",
                                 model_name,
                                 loaded_device_name,
                             )
-                            if current_device >= 0:
-                                loaded_on_gpu = True
                             return
                         except Exception as exc:
                             last_error = exc
-                            exc_str = str(exc).lower()
-                            if "meta tensor" in exc_str or "cannot be called on meta tensors" in exc_str:
+                            self._pipeline = None
+                            self._pipeline_cache_key = None
+                            if is_meta_tensor_error(exc):
                                 LOGGER.debug(
                                     "Meta-tensor load issue for progress model %s with args %s: %s",
                                     model_name,
@@ -424,6 +459,7 @@ class _ProgressModel:
                             continue
 
                 self._pipeline = None
+                self._pipeline_cache_key = None
                 if last_error:
                     raise last_error
                 raise RuntimeError("No usable progress model candidate could be loaded")
@@ -434,6 +470,7 @@ class _ProgressModel:
                     exc,
                 )
                 self._pipeline = None
+                self._pipeline_cache_key = None
 
     def predict(self, text: str, context: dict[str, Any] | None = None) -> ProgressPrediction:
         normalized_context = _normalize_context(context)
@@ -485,7 +522,14 @@ class _ProgressModel:
                             context=normalized_context,
                         )
             except Exception as exc:
-                LOGGER.warning("Ticket progress inference failed, using heuristic fallback: %s", exc)
+                if self._pipeline_cache_key:
+                    discard_cached_pipeline(*self._pipeline_cache_key)
+                    self._pipeline_cache_key = None
+                self._pipeline = None
+                LOGGER.warning(
+                    "Ticket progress inference failed; disabling pretrained model and using heuristic fallback: %s",
+                    exc,
+                )
 
         value, confidence = _heuristic_progress(
             model_input,
