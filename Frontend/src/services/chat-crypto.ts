@@ -28,9 +28,9 @@ const base64FromBytes = (bytes: Uint8Array): string => {
   return btoa(binary);
 };
 
-const bytesFromBase64 = (value: string): Uint8Array => {
+const bytesFromBase64 = (value: string): Uint8Array<ArrayBuffer> => {
   const normalized = (value || '').trim();
-  if (!normalized) return new Uint8Array();
+  if (!normalized) return new Uint8Array(0);
   const binary = atob(normalized);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
@@ -38,6 +38,8 @@ const bytesFromBase64 = (value: string): Uint8Array => {
   }
   return bytes;
 };
+
+const cloneBytes = (bytes: Uint8Array<ArrayBufferLike>): Uint8Array<ArrayBuffer> => Uint8Array.from(bytes);
 
 const exportPublicJwk = async (publicKey: CryptoKey): Promise<JsonWebKey> => {
   return (await crypto.subtle.exportKey('jwk', publicKey)) as JsonWebKey;
@@ -268,10 +270,10 @@ export const decryptTextWithKey = async (
 
 export const encryptBytesWithKey = async (
   key: CryptoKey,
-  bytes: Uint8Array
-): Promise<{ ciphertext: Uint8Array; iv: string; algorithm: 'AES-GCM' }> => {
+  bytes: Uint8Array<ArrayBufferLike>
+): Promise<{ ciphertext: Uint8Array<ArrayBuffer>; iv: string; algorithm: 'AES-GCM' }> => {
   const ivBytes = crypto.getRandomValues(new Uint8Array(12));
-  const cipherBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBytes }, key, bytes);
+  const cipherBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBytes }, key, cloneBytes(bytes));
   return {
     ciphertext: new Uint8Array(cipherBuffer),
     iv: base64FromBytes(ivBytes),
@@ -281,10 +283,10 @@ export const encryptBytesWithKey = async (
 
 export const decryptBytesWithKey = async (
   key: CryptoKey,
-  ciphertext: Uint8Array,
+  ciphertext: Uint8Array<ArrayBufferLike>,
   ivBase64: string
-): Promise<Uint8Array> => {
+): Promise<Uint8Array<ArrayBuffer>> => {
   const ivBytes = bytesFromBase64(ivBase64);
-  const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, ciphertext);
+  const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, cloneBytes(ciphertext));
   return new Uint8Array(plainBuffer);
 };

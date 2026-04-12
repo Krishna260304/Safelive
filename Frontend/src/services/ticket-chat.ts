@@ -143,7 +143,7 @@ export interface TicketChatSessionKeyUpsertResponse {
   peerKey?: TicketChatSessionKeyBundle | null;
 }
 
-export interface TicketChatIdentityKeyUpsertResponse extends TicketChatSessionKeyBundle {}
+export type TicketChatIdentityKeyUpsertResponse = TicketChatSessionKeyBundle;
 export interface TicketChatSessionDisconnectResponse {
   sessionId: string;
   purged: boolean;

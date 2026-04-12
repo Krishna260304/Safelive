@@ -1,10 +1,12 @@
-import { UserType } from '@/types/auth';
+import type { RegistrationFormData } from '@/lib/validation';
 import { Building2, User } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+type RegistrationUserType = RegistrationFormData['userType'];
+
 interface LoginTypeSelectorProps {
-  selectedType: UserType;
-  onSelectType: (type: UserType) => void;
+  selectedType: RegistrationUserType;
+  onSelectType: (type: RegistrationUserType) => void;
 }
 
 export const LoginTypeSelector = ({ selectedType, onSelectType }: LoginTypeSelectorProps) => {

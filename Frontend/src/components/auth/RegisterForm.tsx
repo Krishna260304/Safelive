@@ -8,7 +8,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { LoginTypeSelector } from '@/components/ui/LoginTypeSelector';
-import { UserType } from '@/types/auth';
 import { registrationSchema, RegistrationFormData } from '@/lib/validation';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -49,14 +48,14 @@ export const RegisterForm = () => {
 
   const typeParam = searchParams.get('type');
   const roleParam = searchParams.get('role');
-  const requestedUserType: UserType =
+  const requestedUserType: RegistrationFormData['userType'] =
     typeParam === 'official'
       ? 'official'
       : 'local';
   const requestedOfficialRole: RegistrationFormData['officialRole'] | undefined =
     roleParam === 'department' || roleParam === 'worker' ? roleParam : undefined;
 
-  const [userType, setUserType] = useState<UserType>(requestedUserType);
+  const [userType, setUserType] = useState<RegistrationFormData['userType']>(requestedUserType);
 
   const form = useForm<RegistrationFormData>({
     resolver: zodResolver(registrationSchema),
