@@ -43,3 +43,4 @@ Frontend/.vite/
 
 Backend/.env
 Frontend/.env
+cloudflared.deb
