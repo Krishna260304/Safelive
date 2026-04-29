@@ -32,23 +32,85 @@ RISK_ALIASES = {
     "medium": {"medium", "moderate", "normal", "average"},
     "high": {"high", "major", "urgent", "emergency", "critical", "extreme"},
 }
-HIGH_PRIORITY_CATEGORIES = {"electricity", "safety", "drainage", "waterlogging"}
-MEDIUM_PRIORITY_CATEGORIES = {"pothole", "streetlight", "water_leakage", "garbage"}
-LOW_PRIORITY_CATEGORIES = {"other"}
+PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2}
+HIGH_PRIORITY_CATEGORIES = {
+    "electricity",
+    "electrical",
+    "gas",
+    "safety",
+    "fire",
+    "traffic_signal",
+    "traffic_light",
+}
+MEDIUM_PRIORITY_CATEGORIES = {
+    "pothole",
+    "road",
+    "street",
+    "streetlight",
+    "street_light",
+    "water_leakage",
+    "water_leak",
+    "waterlogging",
+    "drainage",
+    "garbage",
+    "illegal_dumping",
+    "sidewalk",
+    "footpath",
+    "street_sign",
+    "signage",
+}
+LOW_PRIORITY_CATEGORIES = {"other", "graffiti", "cleaning", "beautification"}
 HIGH_PRIORITY_KEYWORDS = {
+    "active hazard",
+    "ambulance blocked",
+    "building collapse",
+    "burst pipe",
+    "cave in",
+    "chemical spill",
+    "collapsed",
+    "contaminated water",
+    "downed power line",
+    "electric shock",
+    "electrical hazard",
+    "exposed wire",
+    "fallen tree blocking",
+    "fire",
+    "flash flood",
+    "flood",
+    "flooded road",
+    "gas leak",
+    "gushing water",
+    "hazardous waste",
+    "hospital access blocked",
+    "impassable",
+    "injury",
     "live wire",
+    "major intersection",
+    "manhole cover missing",
+    "missing manhole",
+    "open drain",
+    "open manhole",
+    "overflowing sewage",
+    "power line",
+    "road blocked",
+    "road cave",
+    "sewer backup",
+    "sewer overflow",
+    "sewage",
+    "sinkhole",
+    "smoke",
+    "spark",
+    "street flooding",
+    "traffic signal dark",
+    "traffic signal out",
+    "tree blocking road",
+    "water main break",
+    "water main leak",
     "electrocution",
     "shock",
-    "spark",
-    "fire",
-    "smoke",
     "sewage overflow",
-    "open manhole",
-    "collapsed",
     "blocked road",
     "accident",
-    "injury",
-    "flood",
     "overflow",
     "urgent",
     "critical",
@@ -57,7 +119,27 @@ HIGH_PRIORITY_KEYWORDS = {
     "emergency",
 }
 MEDIUM_PRIORITY_KEYWORDS = {
+    "broken sign",
+    "clogged drain",
+    "damaged sidewalk",
+    "dead animal",
+    "dumping",
+    "flickering light",
+    "garbage overflow",
+    "garbage overflowing",
+    "illegal dumping",
+    "large pothole",
+    "leaking pipe",
+    "low water pressure",
+    "missed trash",
     "pothole",
+    "public litter",
+    "sidewalk crack",
+    "street sign damaged",
+    "streetlight outage",
+    "streetlight out",
+    "trash pile",
+    "water leak",
     "water leakage",
     "leakage",
     "garbage pile",
@@ -68,6 +150,11 @@ MEDIUM_PRIORITY_KEYWORDS = {
     "needs repair",
 }
 LOW_PRIORITY_KEYWORDS = {
+    "cosmetic",
+    "faded paint",
+    "general inquiry",
+    "graffiti",
+    "litter",
     "minor",
     "small",
     "routine",
@@ -75,6 +162,28 @@ LOW_PRIORITY_KEYWORDS = {
     "non urgent",
     "non-urgent",
     "later",
+}
+SENSITIVE_LOCATION_KEYWORDS = {
+    "ambulance route",
+    "bridge",
+    "bus stop",
+    "busy road",
+    "highway",
+    "hospital",
+    "main road",
+    "market",
+    "school",
+    "senior center",
+    "temple",
+}
+VULNERABLE_ACCESS_KEYWORDS = {
+    "access blocked",
+    "ambulance",
+    "children",
+    "disabled",
+    "elderly",
+    "pedestrian",
+    "wheelchair",
 }
 
 
@@ -96,14 +205,126 @@ def _text_blob(*parts: str | None) -> str:
     return re.sub(r"\s+", " ", merged).strip()
 
 
+def _normalize_token(value: str | None) -> str:
+    normalized = _clean(value).replace("-", "_").replace(" ", "_")
+    return re.sub(r"[^a-z0-9_]+", "", normalized)
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    normalized_text = f" {text.replace('_', ' ')} "
+    normalized_phrase = phrase.replace("_", " ").strip()
+    if not normalized_phrase:
+        return False
+    if re.search(rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])", normalized_text):
+        return True
+    return normalized_phrase in normalized_text
+
+
 def _keyword_hits(text: str, keywords: set[str]) -> int:
     if not text:
         return 0
     hits = 0
     for keyword in keywords:
-        if keyword and keyword in text:
+        if keyword and _contains_phrase(text, keyword):
             hits += 1
     return hits
+
+
+def _matched_keywords(text: str, keywords: set[str]) -> list[str]:
+    if not text:
+        return []
+    return sorted(keyword for keyword in keywords if keyword and _contains_phrase(text, keyword))
+
+
+def _highest_priority(*values: str | None) -> str | None:
+    chosen: str | None = None
+    for value in values:
+        if value not in PRIORITY_RANK:
+            continue
+        if chosen is None or PRIORITY_RANK[value] > PRIORITY_RANK[chosen]:
+            chosen = value
+    return chosen
+
+
+def _civic_triage_rule(
+    *,
+    title: str | None,
+    description: str | None,
+    category: str | None,
+    severity: str | None,
+    location: str | None = None,
+) -> CivicTriageResult:
+    text = _text_blob(title, description, location)
+    category_label = _normalize_token(category)
+    severity_label = _severity_to_priority(severity)
+    high_matches = _matched_keywords(text, HIGH_PRIORITY_KEYWORDS)
+    medium_matches = _matched_keywords(text, MEDIUM_PRIORITY_KEYWORDS)
+    low_matches = _matched_keywords(text, LOW_PRIORITY_KEYWORDS)
+    sensitive_matches = _matched_keywords(text, SENSITIVE_LOCATION_KEYWORDS)
+    vulnerable_matches = _matched_keywords(text, VULNERABLE_ACCESS_KEYWORDS)
+
+    category_hint: str | None = None
+    if category_label in HIGH_PRIORITY_CATEGORIES:
+        category_hint = "high"
+    elif category_label in MEDIUM_PRIORITY_CATEGORIES:
+        category_hint = "medium"
+    elif category_label in LOW_PRIORITY_CATEGORIES:
+        category_hint = "low"
+
+    reasons: list[str] = []
+    priority_floor: str | None = None
+    priority_hint = _highest_priority(severity_label, category_hint)
+
+    if severity_label:
+        reasons.append(f"severity:{severity_label}")
+    if category_hint:
+        reasons.append(f"category:{category_hint}")
+    if high_matches:
+        reasons.append("high_terms:" + ",".join(high_matches[:4]))
+        priority_floor = "high"
+        priority_hint = "high"
+
+    medium_context = bool(medium_matches or category_hint == "medium" or severity_label == "medium")
+    high_context = bool(category_hint == "high" or severity_label == "high")
+    if high_context:
+        priority_floor = "high"
+        priority_hint = "high"
+
+    if medium_matches:
+        reasons.append("medium_terms:" + ",".join(medium_matches[:4]))
+    if sensitive_matches:
+        reasons.append("sensitive_location:" + ",".join(sensitive_matches[:3]))
+    if vulnerable_matches:
+        reasons.append("access_risk:" + ",".join(vulnerable_matches[:3]))
+
+    if priority_floor != "high" and medium_context and (sensitive_matches or vulnerable_matches):
+        priority_floor = "high"
+        priority_hint = "high"
+        reasons.append("escalated_for_public_access")
+    elif priority_floor != "high" and medium_context:
+        priority_floor = _highest_priority(priority_floor, "medium")
+        priority_hint = _highest_priority(priority_hint, "medium")
+
+    if priority_floor is None and priority_hint is None and low_matches:
+        priority_hint = "low"
+        reasons.append("low_terms:" + ",".join(low_matches[:3]))
+
+    confidence = 0.0
+    if priority_floor == "high":
+        confidence = 0.92 if high_matches or high_context else 0.82
+    elif priority_floor == "medium":
+        confidence = 0.78
+    elif priority_hint == "low":
+        confidence = 0.66
+    elif priority_hint:
+        confidence = 0.6
+
+    return CivicTriageResult(
+        priority_floor=priority_floor,
+        priority_hint=priority_hint,
+        confidence=confidence,
+        reasons=tuple(reasons),
+    )
 
 
 def _heuristic_priority_scores(
@@ -112,11 +333,19 @@ def _heuristic_priority_scores(
     description: str | None,
     category: str | None,
     severity: str | None,
+    location: str | None = None,
 ) -> dict[str, float]:
     scores = {"low": 0.3, "medium": 0.4, "high": 0.3}
-    category_label = _clean(category)
+    category_label = _normalize_token(category)
     severity_label = _severity_to_priority(severity)
-    text = _text_blob(title, description)
+    text = _text_blob(title, description, location)
+    triage = _civic_triage_rule(
+        title=title,
+        description=description,
+        category=category,
+        severity=severity,
+        location=location,
+    )
 
     if category_label in HIGH_PRIORITY_CATEGORIES:
         scores["high"] += 0.35
@@ -147,9 +376,22 @@ def _heuristic_priority_scores(
     if low_hits > 0 and high_hits == 0:
         scores["low"] += min(0.4, 0.12 * low_hits)
 
+    if triage.priority_floor == "high":
+        scores["high"] += 0.95
+        scores["medium"] += 0.08
+    elif triage.priority_floor == "medium":
+        scores["medium"] += 0.75
+        scores["high"] += 0.08
+    elif triage.priority_hint == "low" and high_hits == 0 and medium_hits == 0:
+        scores["low"] += 0.35
+
     # Do not down-rank obvious hazards even when text model is uncertain.
     if high_hits > 0 and scores["high"] < scores["medium"]:
         scores["high"] = scores["medium"] + 0.05
+    if triage.priority_floor == "high":
+        scores["high"] = max(scores["high"], max(scores["low"], scores["medium"]) + 0.1)
+    elif triage.priority_floor == "medium" and scores["low"] > scores["medium"]:
+        scores["medium"] = scores["low"] + 0.05
 
     normalized = _normalize_distribution(scores)
     if normalized:
@@ -179,6 +421,28 @@ def _blend_distributions(
         for priority in PRIORITY_LEVELS
     }
     return _normalize_distribution(merged) or normalized_primary
+
+
+def _apply_priority_floor(
+    scores: dict[str, float],
+    triage: CivicTriageResult,
+) -> dict[str, float]:
+    normalized = _normalize_distribution(scores) or {"low": 0.2, "medium": 0.6, "high": 0.2}
+    floor = triage.priority_floor
+    if floor not in PRIORITY_RANK:
+        return normalized
+
+    floor_rank = PRIORITY_RANK[floor]
+    lower_priorities = [priority for priority, rank in PRIORITY_RANK.items() if rank < floor_rank]
+    higher_or_equal = [priority for priority, rank in PRIORITY_RANK.items() if rank >= floor_rank]
+    best_allowed = max(higher_or_equal, key=lambda priority: normalized.get(priority, 0.0))
+    best_lower = max((normalized.get(priority, 0.0) for priority in lower_priorities), default=0.0)
+
+    if normalized.get(best_allowed, 0.0) <= best_lower:
+        adjusted = dict(normalized)
+        adjusted[best_allowed] = best_lower + 0.08
+        return _normalize_distribution(adjusted) or normalized
+    return normalized
 def _clean(value: str | None) -> str:
     return (value or "").strip().lower()
 def _normalize_distribution(raw: dict[str, float] | None) -> dict[str, float] | None:
@@ -232,9 +496,10 @@ Reported category: {selected_category}
 Allowed categories: {allowed_categories}
 Incident details: {narrative}
 Priority policy:
-low = minor issue, no immediate public safety risk
-medium = municipal service disruption needing timely response
-high = active hazard, sewage overflow, severe obstruction, electrical danger, or urgent safety risk
+high = active public hazard or emergency: exposed/downed wires, fire/smoke, gas/chemical spill, sewage overflow, open/missing manhole cover, severe flooding/water main break, road or hospital/school access blocked, dark traffic signal at major intersection, injury risk.
+medium = municipal service disruption needing timely response: pothole, streetlight outage, clogged drain, non-emergency water leak, garbage pile/illegal dumping, damaged sidewalk/sign, dead animal, or routine traffic signal malfunction without immediate danger.
+low = minor cosmetic or non-disruptive issue: small litter, routine cleaning, graffiti without hateful/hazardous content, faded paint, general inquiry.
+Never downgrade a high hazard to medium or a service disruption to low just because no injury has happened yet.
 Return only JSON with this schema:
 {{"risk":"low|medium|high","hazard":"string","reason":"string","confidence":0.0}}
 """.strip()
@@ -312,6 +577,14 @@ class PriorityPrediction:
     priority: str
     confidence: float
     source: str
+
+
+@dataclass(frozen=True)
+class CivicTriageResult:
+    priority_floor: str | None
+    priority_hint: str | None
+    confidence: float
+    reasons: tuple[str, ...]
 class VisionPriorityModel:
     def __init__(self):
         self._processor = None
@@ -810,11 +1083,19 @@ class PriorityClassifier:
                 vision_scores = _normalize_distribution(parsed_scores)
         text_scores = self._text_model.predict_scores(text)
         dataset_scores = self._dataset_model.predict_scores(text)
+        triage = _civic_triage_rule(
+            title=title,
+            description=description,
+            category=category,
+            severity=severity,
+            location=location,
+        )
         heuristic_scores = _heuristic_priority_scores(
             title=title,
             description=description,
             category=category,
             severity=severity,
+            location=location,
         )
         combined, source_name = self._combine_scores(
             vision_scores=vision_scores,
@@ -828,6 +1109,9 @@ class PriorityClassifier:
             # Blend model output with rule-guarded heuristics to reduce obvious misclassifications.
             combined = _blend_distributions(combined, heuristic_scores, primary_weight=0.72)
             source_name = f"{source_name}+heuristic_guard"
+        combined = _apply_priority_floor(combined, triage)
+        if triage.priority_floor or triage.priority_hint:
+            source_name = f"{source_name}+civic_triage"
 
         chosen = max(PRIORITY_LEVELS, key=lambda priority: combined.get(priority, 0.0))
         confidence = round(max(0.0, min(1.0, combined.get(chosen, 0.0))), 4)
