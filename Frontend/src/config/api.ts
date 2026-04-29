@@ -1,7 +1,9 @@
 const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
 
-const defaultApiBaseUrl = '/api';
-const resolvedApiBaseUrl = normalizeBaseUrl(import.meta.env.VITE_API_URL || defaultApiBaseUrl);
+const apiBaseUrl =
+  import.meta.env.VITE_API_URL || 'https://api.safelive.in';
+
+const resolvedApiBaseUrl = `${normalizeBaseUrl(apiBaseUrl)}/api`;
 
 const toWebSocketBaseUrl = (apiBaseUrl: string): string => {
   const explicitWsUrl = (import.meta.env.VITE_WS_URL || '').trim();
@@ -10,7 +12,9 @@ const toWebSocketBaseUrl = (apiBaseUrl: string): string => {
   }
 
   if (apiBaseUrl.startsWith('http://') || apiBaseUrl.startsWith('https://')) {
-    return normalizeBaseUrl(apiBaseUrl.replace(/^http/, 'ws').replace(/\/api\/?$/, ''));
+    return normalizeBaseUrl(
+      apiBaseUrl.replace(/^http/, 'ws').replace(/\/api\/?$/, '')
+    );
   }
 
   if (typeof window !== 'undefined') {
@@ -22,7 +26,7 @@ const toWebSocketBaseUrl = (apiBaseUrl: string): string => {
 };
 
 export const API_CONFIG = {
-  BASE_URL: resolvedApiBaseUrl,
+  BASE_URL: resolvedApiBaseUrl,   
   WS_BASE_URL: toWebSocketBaseUrl(resolvedApiBaseUrl),
   TIMEOUT: Number(import.meta.env.VITE_API_TIMEOUT) || 30000,
 };
@@ -63,16 +67,21 @@ export const API_ENDPOINTS = {
     ASSIGN_SUPERVISOR: (id: string) => `/tickets/${id}/assign-supervisor`,
     PROGRESS_UPDATE: (id: string) => `/tickets/${id}/progress-update`,
     LOGBOOK: (id: string) => `/tickets/${id}/logbook`,
-    DELETE_LOGBOOK_ENTRY: (ticketId: string, entryId: string) => `/tickets/${ticketId}/logbook/${entryId}`,
+    DELETE_LOGBOOK_ENTRY: (ticketId: string, entryId: string) =>
+      `/tickets/${ticketId}/logbook/${entryId}`,
     STATS: '/tickets/stats',
     CHAT_IDENTITY_KEY: '/tickets/chat/identity-key',
     CHAT_INBOX_SUMMARY: '/tickets/chat/inbox-summary',
     CHAT_OPTIONS: (id: string) => `/tickets/${id}/chat/options`,
     CHAT_SESSIONS: (id: string) => `/tickets/${id}/chat/sessions`,
-    CHAT_SESSION_KEY: (ticketId: string, sessionId: string) => `/tickets/${ticketId}/chat/sessions/${sessionId}/crypto-key`,
-    CHAT_MESSAGES: (ticketId: string, sessionId: string) => `/tickets/${ticketId}/chat/sessions/${sessionId}/messages`,
-    CHAT_END: (ticketId: string, sessionId: string) => `/tickets/${ticketId}/chat/sessions/${sessionId}/end`,
-    CHAT_DISCONNECT: (ticketId: string, sessionId: string) => `/tickets/${ticketId}/chat/sessions/${sessionId}/disconnect`,
+    CHAT_SESSION_KEY: (ticketId: string, sessionId: string) =>
+      `/tickets/${ticketId}/chat/sessions/${sessionId}/crypto-key`,
+    CHAT_MESSAGES: (ticketId: string, sessionId: string) =>
+      `/tickets/${ticketId}/chat/sessions/${sessionId}/messages`,
+    CHAT_END: (ticketId: string, sessionId: string) =>
+      `/tickets/${ticketId}/chat/sessions/${sessionId}/end`,
+    CHAT_DISCONNECT: (ticketId: string, sessionId: string) =>
+      `/tickets/${ticketId}/chat/sessions/${sessionId}/disconnect`,
     CHAT_TRANSCRIPT: (ticketId: string, sessionId: string) =>
       `/tickets/${ticketId}/chat/sessions/${sessionId}/transcript.pdf`,
   },
