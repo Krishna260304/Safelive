@@ -57,18 +57,16 @@ export interface ForgotPasswordData {
   phone?: string;
 }
 
-
-
 export const authService = {
   async login(data: LoginData): Promise<ApiResponse<LoginResponse>> {
     const response = await apiClient.post<LoginResponse>(API_ENDPOINTS.AUTH.LOGIN, data);
-    
+
     if (response.success && (response.data as AuthResponse | undefined)?.token) {
       const auth = response.data as AuthResponse;
       authStorage.setToken(auth.token);
       authStorage.setUser(auth.user);
     }
-    
+
     return response;
   },
 
@@ -83,58 +81,55 @@ export const authService = {
     return response;
   },
 
-  async register(data: RegisterData): Promise<ApiResponse<AuthResponse>> {
-    const response = await apiClient.post<AuthResponse>(API_ENDPOINTS.AUTH.REGISTER, data);
-    
+  async register(data: any): Promise<ApiResponse<AuthResponse>> {
+    const payload = {
+      name: data.name || data.fullName,
+      password: data.password,
+      userType: data.userType || 'citizen',
+      email: data.email,
+      phone: data.phone,
+      address: data.address,
+      pincode: data.pincode,
+      officialRole: data.officialRole,
+      workerSpecialization: data.workerSpecialization,
+    };
+
+    const response = await apiClient.post<AuthResponse>(API_ENDPOINTS.AUTH.REGISTER, payload);
+
     if (response.success && response.data?.token) {
       authStorage.setToken(response.data.token);
       authStorage.setUser(response.data.user);
     }
-    
+
     return response;
   },
 
-  async requestPasswordChangeOtp(currentPassword: string): Promise<ApiResponse<{
-    challengeId: string;
-    channels?: string[];
-    maskedEmail?: string;
-    maskedPhone?: string;
-  }>> {
+  async requestPasswordChangeOtp(currentPassword: string): Promise<ApiResponse<any>> {
     return apiClient.post(API_ENDPOINTS.AUTH.CHANGE_PASSWORD_REQUEST_OTP, { currentPassword });
   },
 
-  async confirmPasswordChange(challengeId: string, otp: string, newPassword: string): Promise<ApiResponse<{ changed: boolean }>> {
+  async confirmPasswordChange(challengeId: string, otp: string, newPassword: string): Promise<ApiResponse<any>> {
     return apiClient.post(API_ENDPOINTS.AUTH.CHANGE_PASSWORD_CONFIRM, { challengeId, otp, newPassword });
   },
 
-  async requestEnable2faOtp(): Promise<ApiResponse<{
-    challengeId: string;
-    channels?: string[];
-    maskedEmail?: string;
-    maskedPhone?: string;
-  }>> {
+  async requestEnable2faOtp(): Promise<ApiResponse<any>> {
     return apiClient.post(API_ENDPOINTS.AUTH.TWO_FA_ENABLE_REQUEST_OTP);
   },
 
-  async confirmEnable2fa(challengeId: string, otp: string): Promise<ApiResponse<AuthResponse['user']>> {
-    const response = await apiClient.post<AuthResponse['user']>(API_ENDPOINTS.AUTH.TWO_FA_ENABLE_CONFIRM, { challengeId, otp });
+  async confirmEnable2fa(challengeId: string, otp: string): Promise<ApiResponse<any>> {
+    const response = await apiClient.post(API_ENDPOINTS.AUTH.TWO_FA_ENABLE_CONFIRM, { challengeId, otp });
     if (response.success && response.data) {
       authStorage.setUser(response.data);
     }
     return response;
   },
 
-  async requestDisable2faOtp(): Promise<ApiResponse<{
-    challengeId: string;
-    channels?: string[];
-    maskedEmail?: string;
-    maskedPhone?: string;
-  }>> {
+  async requestDisable2faOtp(): Promise<ApiResponse<any>> {
     return apiClient.post(API_ENDPOINTS.AUTH.TWO_FA_DISABLE_REQUEST_OTP);
   },
 
-  async confirmDisable2fa(challengeId: string, otp: string): Promise<ApiResponse<AuthResponse['user']>> {
-    const response = await apiClient.post<AuthResponse['user']>(API_ENDPOINTS.AUTH.TWO_FA_DISABLE_CONFIRM, { challengeId, otp });
+  async confirmDisable2fa(challengeId: string, otp: string): Promise<ApiResponse<any>> {
+    const response = await apiClient.post(API_ENDPOINTS.AUTH.TWO_FA_DISABLE_CONFIRM, { challengeId, otp });
     if (response.success && response.data) {
       authStorage.setUser(response.data);
     }
@@ -156,9 +151,7 @@ export const authService = {
 
   getCurrentUser() {
     const userStr = authStorage.getUser();
-    if (!userStr) {
-      return null;
-    }
+    if (!userStr) return null;
     try {
       return JSON.parse(userStr);
     } catch {
