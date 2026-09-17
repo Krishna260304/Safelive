@@ -54,26 +54,15 @@ Thumbs.db
 # Project-generated assets
 Backend/images/
 
-# SafeLive IoT device runtime and test data
-iot_rpi/.env
-iot_rpi/venv/
-iot_rpi/data/
-iot_rpi/logs/
-iot_rpi/test_results/
-iot_rpi/test_data/
-iot_rpi/test_images/
-iot_rpi/runs/
-iot_rpi/*.db
-iot_rpi/*.log
-iot_rpi/models/*_ncnn_model/
-iot_rpi/models/*.onnx
-iot_rpi/models/*.engine
+# SafeLive IoT and training source bundles are kept outside Git
+iot_rpi/
+tools/
 
 # Local training outputs and downloaded checkpoints
 runs/
 weights/
 *.pt
-!iot_rpi/models/best.pt
+*.weights
 
 # Datasets and imported data files (keep these out of the repository)
 *.csv
@@ -105,6 +94,17 @@ archives/
 *.tflite
 *.ncnn.bin
 *.ncnn.param
+*.bin
+
+# Large media and exported test assets
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.avi
+*.mov
+*.mkv
 
 # Local test and profiling output
 test_results/
