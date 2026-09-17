@@ -53,3 +53,62 @@ Thumbs.db
 
 # Project-generated assets
 Backend/images/
+
+# SafeLive IoT device runtime and test data
+iot_rpi/.env
+iot_rpi/venv/
+iot_rpi/data/
+iot_rpi/logs/
+iot_rpi/test_results/
+iot_rpi/test_data/
+iot_rpi/test_images/
+iot_rpi/runs/
+iot_rpi/*.db
+iot_rpi/*.log
+iot_rpi/models/*_ncnn_model/
+iot_rpi/models/*.onnx
+iot_rpi/models/*.engine
+
+# Local training outputs and downloaded checkpoints
+runs/
+weights/
+*.pt
+!iot_rpi/models/best.pt
+
+# Datasets and imported data files (keep these out of the repository)
+*.csv
+*.tsv
+*.jsonl
+*.ndjson
+*.parquet
+*.feather
+*.xlsx
+*.xls
+*.sqlite
+*.sqlite3
+*.db
+datasets/
+dataset/
+data/
+archive/
+archives/
+
+# Downloaded installers, archives, and generated export files
+*.deb
+*.rpm
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.onnx
+*.engine
+*.tflite
+*.ncnn.bin
+*.ncnn.param
+
+# Local test and profiling output
+test_results/
+test_output/
+coverage/
+*.prof
+*.profraw
