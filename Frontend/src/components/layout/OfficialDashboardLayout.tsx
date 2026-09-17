@@ -5,6 +5,7 @@ import {
   Building2,
   ChevronDown,
   ClipboardList,
+  Cpu,
   Home,
   LogOut,
   MapPin,
@@ -67,17 +68,24 @@ export const OfficialDashboardLayout = ({ children, onSettingsClick }: OfficialD
       { icon: Home, label: 'Dashboard', path: '/official/dashboard' },
       { icon: ClipboardList, label: 'Tickets', path: '/official/tickets' },
     ];
-    if (role === 'department') {
+    if (role === 'field_inspector') {
       return [
         ...common,
-        { icon: UserPlus, label: 'Team', path: '/official/team' },
-        { icon: MapPin, label: 'Live Map', path: '/official/map' },
-        { icon: Bell, label: 'Alerts', path: '/official/alerts' },
+        { icon: Cpu, label: 'Device', path: '/official/device' },
       ];
     }
     if (role === 'supervisor') {
       return [
         ...common,
+        { icon: MapPin, label: 'Live Map', path: '/official/map' },
+        { icon: Bell, label: 'Alerts', path: '/official/alerts' },
+        { icon: Cpu, label: 'Device', path: '/official/device' },
+      ];
+    }
+    if (role === 'department') {
+      return [
+        ...common,
+        { icon: UserPlus, label: 'Team', path: '/official/team' },
         { icon: MapPin, label: 'Live Map', path: '/official/map' },
         { icon: Bell, label: 'Alerts', path: '/official/alerts' },
       ];

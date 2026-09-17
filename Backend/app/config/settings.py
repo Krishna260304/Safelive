@@ -119,10 +119,20 @@ class Settings:
     PRIORITY_AI_MAX_IMAGES = _env_int("PRIORITY_AI_MAX_IMAGES", 1)
     PRIORITY_AI_MAX_NEW_TOKENS = _env_int("PRIORITY_AI_MAX_NEW_TOKENS", 56)
     PRIORITY_AI_IMAGE_MAX_EDGE = _env_int("PRIORITY_AI_IMAGE_MAX_EDGE", 960)
-    PRIORITY_AI_ENABLE_DATASET_MODEL = _env_bool("PRIORITY_AI_ENABLE_DATASET_MODEL", False)
-    PRIORITY_AI_EXTERNAL_DATASET = os.getenv("PRIORITY_AI_EXTERNAL_DATASET", "")
+    PRIORITY_AI_ENABLE_DATASET_MODEL = _env_bool("PRIORITY_AI_ENABLE_DATASET_MODEL", True)
+    PRIORITY_AI_EXTERNAL_DATASET = os.getenv(
+        "PRIORITY_AI_EXTERNAL_DATASET",
+        ",".join(
+            str(path)
+            for path in (
+                Path(__file__).resolve().parents[3] / "synthetic_complaints_datechange.csv",
+                Path(__file__).resolve().parents[3] / "civic_issues_with_severity-1.csv",
+            )
+            if path.exists()
+        ),
+    )
     PRIORITY_AI_MIN_TRAIN_SAMPLES = _env_int("PRIORITY_AI_MIN_TRAIN_SAMPLES", 30)
-    PRIORITY_AI_MAX_TRAIN_ROWS = _env_int("PRIORITY_AI_MAX_TRAIN_ROWS", 200)
+    PRIORITY_AI_MAX_TRAIN_ROWS = _env_int("PRIORITY_AI_MAX_TRAIN_ROWS", 12000)
     PRIORITY_AI_VISION_WEIGHT = _env_float("PRIORITY_AI_VISION_WEIGHT", 0.7)
     PRIORITY_AI_TEXT_WEIGHT = _env_float("PRIORITY_AI_TEXT_WEIGHT", 0.3)
     PRIORITY_AI_DATASET_WEIGHT = _env_float("PRIORITY_AI_DATASET_WEIGHT", 0.2)

@@ -16,9 +16,10 @@ import OfficialDashboard from "./pages/OfficialDashboard";
 import OfficialTeam from "./pages/OfficialTeam";
 import OfficialMap from "./pages/OfficialMap";
 import OfficialAlerts from "./pages/OfficialAlerts";
-import NotFound from "./pages/NotFound";
 import Analytics from "./pages/Analytics";
 import Reports from "./pages/Reports";
+import OfficialDevice from "./pages/OfficialDevice";
+import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
@@ -49,11 +50,9 @@ const App = () => (
             <Route path="/official/tickets" element={<OfficialDashboard />} />
             <Route path="/official/team" element={<OfficialTeam />} />
             <Route path="/official/map" element={<OfficialMap />} />
-            
+            <Route path="/official/device" element={<OfficialDevice />} />
             <Route path="/official/analytics" element={<Analytics />} />
-            
             <Route path="/official/reports" element={<Reports />} />
-            
             <Route path="/official/alerts" element={<OfficialAlerts />} />
             <Route path="/official/settings" element={<OfficialDashboard />} />
           </Route>

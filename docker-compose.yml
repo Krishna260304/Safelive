@@ -5,7 +5,9 @@ services:
     restart: always
 
   backend:
-    build: ./Backend
+    build:
+      context: .
+      dockerfile: Backend/Dockerfile
     container_name: safelive-backend
     ports:
       - "8000:8000"
@@ -13,6 +15,7 @@ services:
       - ./Backend/.env
     environment:
       - MONGO_URL=mongodb://mongodb:27017
+      - PRIORITY_AI_EXTERNAL_DATASET=/app/synthetic_complaints_datechange.csv,/app/civic_issues_with_severity-1.csv
     depends_on:
       - mongodb
     restart: always

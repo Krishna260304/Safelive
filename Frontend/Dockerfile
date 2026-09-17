@@ -4,7 +4,7 @@ WORKDIR /app
 RUN npm install -g pnpm
 
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install
+RUN pnpm install --config.dangerously-allow-all-builds=true
 
 COPY . .
 RUN pnpm run build

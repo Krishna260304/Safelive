@@ -5,6 +5,8 @@ import difflib
 import math
 import re
 import secrets
+import socket
+import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
@@ -63,6 +65,9 @@ IOT_PRIORITY_BY_SEVERITY = {
 }
 OFFICIAL_ACTIVITY_ROLES = {"department", "supervisor", "field_inspector", "worker"}
 ROLE_FIELD_INSPECTOR = "field_inspector"
+
+IOT_DISCOVERY_PORT = 37020
+IOT_DISCOVERY_MESSAGE = b"SAFELIVE_DISCOVER_RPI5"
 LOCAL_REPORTER_EDIT_WINDOW_MINUTES = 5
 LOCAL_USER_TYPES = {"citizen", "local"}
 INACTIVE_DUPLICATE_STATUSES = {"resolved", "rejected"}
@@ -168,6 +173,47 @@ def _validate_iot_api_key(api_key: str):
         if secrets.compare_digest(candidate, api_key):
             return
     raise HTTPException(status_code=401, detail="Invalid IoT API key")
+
+
+@router.get("/iot/discover")
+def discover_iot_devices(current_user: dict = Depends(get_current_user)):
+    """Discover RPi 5 units announcing on the same LAN as this API server."""
+    if not is_official_account(current_user):
+        raise HTTPException(status_code=403, detail="Official account required")
+
+    devices: dict[str, dict] = {}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(0.35)
+    try:
+        sock.sendto(IOT_DISCOVERY_MESSAGE, ("255.255.255.255", IOT_DISCOVERY_PORT))
+        while True:
+            try:
+                raw, address = sock.recvfrom(4096)
+            except socket.timeout:
+                break
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if payload.get("service") != "safelive-rpi5":
+                continue
+            host = str(payload.get("host") or address[0])
+            port = int(payload.get("port") or 8080)
+            device_id = str(payload.get("device_id") or "").strip()
+            if not device_id:
+                continue
+            devices[device_id] = {
+                "id": device_id,
+                "name": payload.get("device_name") or device_id,
+                "ssid": payload.get("ssid") or "",
+                "url": f"http://{host}:{port}",
+                "ip": f"{host}:{port}",
+                "isOnline": True,
+            }
+    finally:
+        sock.close()
+    return list(devices.values())
 
 def _resolve_request_ip(request: Request) -> str | None:
     for header_name in ("cf-connecting-ip", "x-forwarded-for", "x-real-ip"):
@@ -580,6 +626,28 @@ def _find_local_duplicate_incident(
             best_score = similarity_score
 
     return best_match
+
+
+def _find_iot_duplicate_incident(*, latitude: float, longitude: float, category: str, now: str) -> dict | None:
+    """Treat retries and repeated camera frames at the same place as one incident."""
+    cutoff = datetime.utcnow() - timedelta(minutes=10)
+    radius_meters = max(float(settings.INCIDENT_DUPLICATE_RADIUS_METERS or 0.0), 4.0)
+    lat_delta = _meters_to_latitude_delta(radius_meters)
+    lon_delta = _meters_to_longitude_delta(radius_meters, latitude)
+    query = {
+        "reporterUserType": "iot",
+        "category": category,
+        "createdAt": {"$gte": cutoff.isoformat()},
+        "status": {"$nin": sorted(INACTIVE_DUPLICATE_STATUSES)},
+        "latitude": {"$gte": latitude - lat_delta, "$lte": latitude + lat_delta},
+        "longitude": {"$gte": longitude - lon_delta, "$lte": longitude + lon_delta},
+    }
+    for candidate in incidents.find(query).sort("createdAt", -1).limit(25):
+        candidate_lat = _safe_float(candidate.get("latitude"))
+        candidate_lon = _safe_float(candidate.get("longitude"))
+        if candidate_lat is not None and candidate_lon is not None and _haversine_distance_meters(latitude, longitude, candidate_lat, candidate_lon) <= radius_meters:
+            return candidate
+    return None
 
 def _merge_local_duplicate_into_incident(existing_doc: dict, current_user: dict, *, now: str) -> dict:
     obj_id = existing_doc.get("_id")
@@ -1485,6 +1553,27 @@ async def report_issue(
                 },
                 "data": payload,
             }
+
+    spatial_duplicate = _find_iot_duplicate_incident(
+        latitude=latitude,
+        longitude=longitude,
+        category=category_value,
+        now=now,
+    )
+    if spatial_duplicate:
+        payload = _sanitize_incident_payload(serialize_doc(spatial_duplicate)) or {}
+        return {
+            "success": True,
+            "duplicate": True,
+            "ack": {
+                "incidentId": payload.get("incidentId") or payload.get("id"),
+                "ticketId": payload.get("ticketId"),
+                "eventId": event_id or None,
+                "receivedAt": now,
+                "duplicate": True,
+            },
+            "data": payload,
+        }
 
     image_urls = _save_images(cleaned_images)
 

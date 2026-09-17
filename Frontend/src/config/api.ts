@@ -1,9 +1,21 @@
 const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
 
-const apiBaseUrl =
-  import.meta.env.VITE_API_URL || 'https://api.safelive.in';
+const resolveApiBaseUrl = (): string => {
+  const explicitUrl = (import.meta.env.VITE_API_URL || '').trim();
+  if (explicitUrl) {
+    const normalized = normalizeBaseUrl(explicitUrl);
+    return normalized.endsWith('/api') ? normalized : `${normalized}/api`;
+  }
 
-const resolvedApiBaseUrl = `${normalizeBaseUrl(apiBaseUrl)}/api`;
+  // In browser environment, default to current origin /api (works with Vite dev proxy and Nginx reverse proxy)
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}/api`;
+  }
+
+  return 'http://localhost:8000/api';
+};
+
+const resolvedApiBaseUrl = resolveApiBaseUrl();
 
 const toWebSocketBaseUrl = (apiBaseUrl: string): string => {
   const explicitWsUrl = (import.meta.env.VITE_WS_URL || '').trim();
@@ -22,7 +34,7 @@ const toWebSocketBaseUrl = (apiBaseUrl: string): string => {
     return `${protocol}://${window.location.host}`;
   }
 
-  return '';
+  return 'ws://localhost:8000';
 };
 
 export const API_CONFIG = {

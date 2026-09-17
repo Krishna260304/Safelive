@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SafeLive RPi Setup</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { max-width: 720px; margin: 0 auto; padding: 24px; background: #10151c; color: #edf2f7; }
+    h1 { margin-top: 0; color: #62d8ff; }
+    section { background: #19232e; border: 1px solid #2c3d4d; border-radius: 10px; padding: 18px; margin: 16px 0; }
+    label { display: block; margin: 12px 0 5px; color: #b8c7d6; }
+    input, button { box-sizing: border-box; width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #52677a; background: #0e151c; color: #fff; font-size: 1rem; }
+    button { margin-top: 16px; background: #087ea4; border: 0; cursor: pointer; }
+    button:hover { background: #0999c5; }
+    .check { display: flex; gap: 10px; align-items: center; }
+    .check input { width: auto; }
+    pre { white-space: pre-wrap; word-break: break-word; color: #9de7b1; }
+    .muted { color: #9eacb9; }
+    .error { color: #ff9c9c; }
+  </style>
+</head>
+<body>
+  <h1>SafeLive RPi 5 Setup</h1>
+  <p class="muted">Connect to this page through the device's private IP, for example <code>http://192.168.4.1:8080/setup</code>.</p>
+
+  <section id="loginSection">
+    <h2>Device login</h2>
+    <label for="password">Device password</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <button onclick="login()">Connect</button>
+    <p id="loginMessage" class="error"></p>
+  </section>
+
+  <main id="deviceSection" hidden>
+    <section>
+      <h2>Device status</h2>
+      <pre id="status">Loading...</pre>
+      <button onclick="loadStatus()">Refresh status</button>
+    </section>
+
+    <section>
+      <h2>Runtime settings</h2>
+      <label for="serverUrl">Central server URL</label>
+      <input id="serverUrl" type="url" placeholder="https://example.com/api/iot/incidents">
+      <label for="confidence">Detection confidence threshold (0.1–1.0)</label>
+      <input id="confidence" type="number" min="0.1" max="1" step="0.01">
+      <label for="cooldown">Duplicate cooldown (seconds)</label>
+      <input id="cooldown" type="number" min="5" step="1">
+      <label class="check"><input id="sync" type="checkbox"> Enable central server synchronization</label>
+      <label for="newPassword">New device password (optional)</label>
+      <input id="newPassword" type="password" minlength="4" placeholder="Leave blank to keep current password">
+      <button onclick="saveSettings()">Save settings</button>
+      <p id="message" class="muted"></p>
+    </section>
+  </main>
+
+  <script>
+    let token = sessionStorage.getItem("safelive_token") || "";
+    const headers = () => ({ "Authorization": `Bearer ${token}`, "Content-Type": "application/json" });
+    const show = (id, value) => document.getElementById(id).textContent = value;
+
+    async function login() {
+      show("loginMessage", "Connecting...");
+      const password = document.getElementById("password").value;
+      try {
+        const response = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Authentication failed");
+        token = data.token;
+        sessionStorage.setItem("safelive_token", token);
+        document.getElementById("loginSection").hidden = true;
+        document.getElementById("deviceSection").hidden = false;
+        await loadSettings();
+        await loadStatus();
+      } catch (error) { show("loginMessage", error.message); }
+    }
+
+    async function loadSettings() {
+      const response = await fetch("/api/config", { headers: headers() });
+      if (response.status === 401) return logout();
+      const data = await response.json();
+      document.getElementById("serverUrl").value = data.server_url || "";
+      document.getElementById("confidence").value = data.confidence_threshold ?? 0.45;
+      document.getElementById("cooldown").value = data.cooldown_seconds ?? 45;
+      document.getElementById("sync").checked = Boolean(data.server_sync_enabled);
+    }
+
+    async function loadStatus() {
+      const response = await fetch("/api/status", { headers: headers() });
+      if (response.status === 401) return logout();
+      show("status", JSON.stringify(await response.json(), null, 2));
+    }
+
+    async function saveSettings() {
+      const password = document.getElementById("newPassword").value;
+      const body = {
+        server_url: document.getElementById("serverUrl").value,
+        confidence_threshold: Number(document.getElementById("confidence").value),
+        cooldown_seconds: Number(document.getElementById("cooldown").value),
+        server_sync_enabled: document.getElementById("sync").checked
+      };
+      if (password) body.new_device_password = password;
+      const response = await fetch("/api/config", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      const data = await response.json();
+      if (!response.ok) return show("message", data.detail || "Could not save settings");
+      document.getElementById("newPassword").value = "";
+      show("message", "Settings saved successfully.");
+      await loadSettings();
+    }
+
+    function logout() {
+      sessionStorage.removeItem("safelive_token");
+      token = "";
+      document.getElementById("loginSection").hidden = false;
+      document.getElementById("deviceSection").hidden = true;
+    }
+
+    if (token) {
+      document.getElementById("loginSection").hidden = true;
+      document.getElementById("deviceSection").hidden = false;
+      loadSettings().then(loadStatus).catch(logout);
+    }
+  </script>
+</body>
+</html>

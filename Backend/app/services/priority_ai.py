@@ -568,11 +568,13 @@ class DatasetPriorityModel:
         return " ".join(
             part
             for part in [
-                str(row.get("title") or "").strip(),
+                str(row.get("title") or row.get("text_description") or row.get("filename") or "").strip(),
                 str(row.get("description") or "").strip(),
-                f"Category {row.get('category')}" if row.get("category") else "",
+                f"Category {row.get('category') or row.get('issue_type')}" if row.get("category") or row.get("issue_type") else "",
+                f"Department {row.get('department')}" if row.get("department") else "",
                 f"Location {row.get('location')}" if row.get("location") else "",
-                f"Severity {row.get('severity')}" if row.get("severity") else "",
+                f"Severity {row.get('severity') or row.get('severity_level')}" if row.get("severity") or row.get("severity_level") else "",
+                f"Status {row.get('status')}" if row.get("status") else "",
                 f"Scope {row.get('scope')}" if row.get("scope") else "",
             ]
             if part
@@ -596,47 +598,28 @@ class DatasetPriorityModel:
             labels.append(label)
         return texts, labels
     def _collect_external_rows(self) -> tuple[list[str], list[str]]:
-        dataset_path = (settings.PRIORITY_AI_EXTERNAL_DATASET or "").strip()
-        if not dataset_path:
-            return [], []
-        file_path = Path(dataset_path)
-        if not file_path.exists():
-            LOGGER.warning("External priority dataset not found: %s", dataset_path)
+        dataset_paths = [Path(path.strip()) for path in (settings.PRIORITY_AI_EXTERNAL_DATASET or "").split(",") if path.strip()]
+        if not dataset_paths:
             return [], []
         texts: list[str] = []
         labels: list[str] = []
-        try:
-            if file_path.suffix.lower() == ".jsonl":
-                with file_path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
-                        try:
-                            row = json.loads(line)
-                        except Exception:
-                            continue
-                        if not isinstance(row, dict):
-                            continue
-                        label = _clean(str(row.get("priority") or row.get("label") or ""))
-                        if label not in PRIORITY_LEVELS:
-                            continue
-                        text = self._build_text(row) or str(row.get("text") or "").strip()
-                        if not text:
-                            continue
-                        texts.append(text)
-                        labels.append(label)
-            elif file_path.suffix.lower() == ".csv":
+        for file_path in dataset_paths:
+            if not file_path.exists():
+                LOGGER.warning("External priority dataset not found: %s", file_path)
+                continue
+            try:
                 with file_path.open("r", encoding="utf-8", newline="") as handle:
                     reader = csv.DictReader(handle)
                     for row in reader:
-                        label = _clean(str(row.get("priority") or row.get("label") or ""))
+                        label = _severity_to_priority(str(row.get("priority") or row.get("severity_level") or row.get("label") or ""))
                         if label not in PRIORITY_LEVELS:
                             continue
                         text = self._build_text(row) or str(row.get("text") or "").strip()
-                        if not text:
-                            continue
-                        texts.append(text)
-                        labels.append(label)
-        except Exception as exc:
-            LOGGER.warning("Failed to load external priority dataset: %s", exc)
+                        if text:
+                            texts.append(text)
+                            labels.append(label)
+            except Exception as exc:
+                LOGGER.warning("Failed to load external priority dataset %s: %s", file_path, exc)
         return texts, labels
     def _ensure_loaded(self) -> None:
         if self._load_attempted:
@@ -650,23 +633,22 @@ class DatasetPriorityModel:
             try:
                 from sklearn.feature_extraction.text import TfidfVectorizer
                 from sklearn.linear_model import LogisticRegression
+                from scipy.sparse import hstack
             except Exception as exc:
                 LOGGER.warning("scikit-learn unavailable for dataset priority model: %s", exc)
                 return
-            mongo_texts, mongo_labels = self._collect_mongo_rows()
-            ext_texts, ext_labels = self._collect_external_rows()
-            texts = mongo_texts + ext_texts
-            labels = mongo_labels + ext_labels
+            texts, labels = self._collect_external_rows()
             min_samples = max(int(settings.PRIORITY_AI_MIN_TRAIN_SAMPLES), 30)
             if len(texts) < min_samples:
                 LOGGER.info("Dataset priority model skipped. samples=%s required=%s", len(texts), min_samples)
                 return
             try:
-                vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_features=60000)
-                matrix = vectorizer.fit_transform(texts)
-                classifier = LogisticRegression(max_iter=1600, class_weight="balanced")
+                word_vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True, max_features=60000)
+                char_vectorizer = TfidfVectorizer(analyzer="char", ngram_range=(3, 5), min_df=2, sublinear_tf=True, max_features=60000)
+                matrix = hstack((word_vectorizer.fit_transform(texts), char_vectorizer.fit_transform(texts)))
+                classifier = LogisticRegression(C=4.0, max_iter=2000, class_weight="balanced", random_state=42)
                 classifier.fit(matrix, labels)
-                self._vectorizer = vectorizer
+                self._vectorizer = (word_vectorizer, char_vectorizer)
                 self._classifier = classifier
                 LOGGER.info("Dataset priority model trained. samples=%s", len(texts))
             except Exception as exc:
@@ -678,7 +660,10 @@ class DatasetPriorityModel:
         if not self._vectorizer or not self._classifier:
             return None
         try:
-            matrix = self._vectorizer.transform([text or "municipal incident"])
+            word_vectorizer, char_vectorizer = self._vectorizer
+            from scipy.sparse import hstack
+            sample = text or "municipal incident"
+            matrix = hstack((word_vectorizer.transform([sample]), char_vectorizer.transform([sample])))
             probabilities = self._classifier.predict_proba(matrix)[0]
             classes = list(self._classifier.classes_)
             raw = {priority: 0.0 for priority in PRIORITY_LEVELS}
@@ -808,26 +793,16 @@ class PriorityClassifier:
                         except Exception:
                             continue
                 vision_scores = _normalize_distribution(parsed_scores)
-        text_scores = self._text_model.predict_scores(text)
         dataset_scores = self._dataset_model.predict_scores(text)
-        heuristic_scores = _heuristic_priority_scores(
-            title=title,
-            description=description,
-            category=category,
-            severity=severity,
-        )
-        combined, source_name = self._combine_scores(
-            vision_scores=vision_scores,
-            text_scores=text_scores,
-            dataset_scores=dataset_scores,
-        )
-        if source_name == "default":
-            combined = heuristic_scores
-            source_name = "heuristic"
-        else:
-            # Blend model output with rule-guarded heuristics to reduce obvious misclassifications.
-            combined = _blend_distributions(combined, heuristic_scores, primary_weight=0.72)
-            source_name = f"{source_name}+heuristic_guard"
+        combined = dataset_scores
+        source_name = "dataset"
+        if not combined:
+            combined, source_name = self._combine_scores(
+                vision_scores=vision_scores,
+                text_scores=None,
+                dataset_scores=None,
+            )
+            source_name = "dataset_unavailable+vision" if vision_scores else "dataset_unavailable"
 
         chosen = max(PRIORITY_LEVELS, key=lambda priority: combined.get(priority, 0.0))
         confidence = round(max(0.0, min(1.0, combined.get(chosen, 0.0))), 4)
